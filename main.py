@@ -1,9 +1,103 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import io
+import json
+import os
+import tempfile
+import uvicorn
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import uvicorn, json
+
+# ReportLab imports for Text-to-PDF
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
+
+
+
+
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.enums import TA_LEFT
+
+# Document conversion imports
+from docx import Document
+from pdf2docx import Converter
+import re
+
+# Your existing RAG import
 from rag_engine import RAGEngine, CLOUD_MODELS
+
+def format_text_to_story(text, styles):
+    story = []
+    lines = text.split('\n')
+    
+    # Custom Resume Styles
+    section_title = ParagraphStyle(
+        'SectionTitle', parent=styles['Heading2'], fontSize=12, 
+        spaceBefore=12, spaceAfter=6, borderPadding=2, fontName='Helvetica-Bold'
+    )
+    
+    body_text = ParagraphStyle(
+        'BodyText', parent=styles['Normal'], fontSize=10, leading=12, spaceAfter=4
+    )
+
+    in_education_section = False
+    edu_data = []
+
+    for line in lines:
+        clean_line = line.strip()
+        if not clean_line: continue
+        
+        formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
+
+        # Detect Sections
+        if clean_line in ["EXPERIENCE", "PROJECT", "EDUCATION", "SKILLS", "ACHIEVEMENTS"]:
+            # If we were in education, flush the table first
+            if in_education_section and edu_data:
+                t = Table(edu_data, colWidths=[300, 150])
+                t.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'), ('FONTSIZE',(0,0),(-1,-1), 9)]))
+                story.append(t)
+                edu_data = []
+            
+            in_education_section = (clean_line == "EDUCATION")
+            story.append(Paragraph(clean_line, section_title))
+            continue
+
+        # Handle Education Table Data
+        if in_education_section:
+            if ',' in clean_line:
+                parts = clean_line.split(',', 1)
+                edu_data.append([Paragraph(parts[0], body_text), Paragraph(parts[1], body_text)])
+            else:
+                edu_data.append([Paragraph(clean_line, body_text), ""])
+            continue
+
+        # Handle Bullet Points
+        if clean_line.startswith(('-', '•', '*')):
+            p_text = clean_line.lstrip('-•* ').strip()
+            formatted_bullet = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', p_text)
+            story.append(Paragraph(f"• {formatted_bullet}", body_text))
+        else:
+            # Handle Header Info (Name, Contact)
+            if any(x in clean_line for x in ["7076853097", "@gmail.com"]):
+                styles['Normal'].alignment = TA_LEFT
+                story.append(Paragraph(formatted_line, styles['Normal']))
+            else:
+                story.append(Paragraph(formatted_line, body_text))
+                
+    # Final flush for Education if it was the last section
+    if edu_data:
+        t = Table(edu_data, colWidths=[300, 150])
+        story.append(t)
+
+    return story
+
 
 app = FastAPI(title="RAG Agent API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
@@ -70,6 +164,112 @@ async def query(req: QueryRequest):
 async def health():
     return {"status": "healthy", "ollama": await rag.check_ollama(),
             "documents_loaded": len(rag.get_documents())}
+
+
+@app.post("/convert/text-to-pdf")
+async def text_to_pdf(text: str = Query(...)):
+    buffer = io.BytesIO()
+    # 1. Create the Doc Template
+    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+    
+    # 2. Setup Styles
+    styles = getSampleStyleSheet()
+    # Ensure Justify style exists
+    if 'Justify' not in styles:
+        styles.add(ParagraphStyle(name='Justify', alignment=TA_LEFT, fontSize=11, leading=14))
+    
+    story = []
+    
+    # 3. Process the text into Paragraphs
+    lines = text.split('\n')
+    for line in lines:
+        clean_line = line.strip()
+        
+        # Handle Empty Lines
+        if not clean_line:
+            story.append(Spacer(1, 12))
+            continue
+            
+        # Handle Separators
+        if clean_line.startswith('---'):
+            story.append(Spacer(1, 6))
+            continue
+
+        # Correctly convert **bold** to <b>bold</b> using Regex
+        # This prevents the "unclosed tag" error that caused your crash
+        formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
+        
+        # Handle Headers
+        if clean_line.startswith('###'):
+            p_text = clean_line.replace('###', '').strip()
+            # Headers also need the formatting for any bold text inside them
+            formatted_h = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', p_text)
+            story.append(Paragraph(formatted_h, styles['Heading2']))
+        else:
+            story.append(Paragraph(formatted_line, styles['Justify']))
+            story.append(Spacer(1, 6))
+
+    doc.build(story)
+    buffer.seek(0)
+    return StreamingResponse(buffer, media_type="application/pdf", 
+                             headers={"Content-Disposition": "attachment; filename=formated_legal.pdf"})
+
+@app.post("/convert/word-to-pdf")
+async def word_to_pdf(file: UploadFile = File(...)):
+    try:
+        # Read Word file content
+        content = await file.read()
+        word_doc = Document(io.BytesIO(content))
+        
+        # Standardize extraction: preserve spacing between paragraphs
+        full_text = "\n".join([para.text for para in word_doc.paragraphs])
+        
+        buffer = io.BytesIO()
+        pdf_doc = SimpleDocTemplate(
+            buffer, 
+            pagesize=letter,
+            rightMargin=50, leftMargin=50, 
+            topMargin=50, bottomMargin=50
+        )
+        styles = getSampleStyleSheet()
+        
+        # Apply unified formatting
+        story = format_text_to_story(full_text, styles)
+        
+        pdf_doc.build(story)
+        buffer.seek(0)
+        
+        return StreamingResponse(
+            buffer, 
+            media_type="application/pdf", 
+            headers={"Content-Disposition": "attachment; filename=consistent_output.pdf"}
+        )
+    except Exception as e:
+        raise HTTPException(500, detail=f"Formatting Error: {str(e)}")
+
+@app.post("/convert/pdf-to-word")
+async def pdf_to_word(file: UploadFile = File(...)):
+    # Requires a temporary file because pdf2docx reads from path
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        tmp_pdf.write(await file.read())
+        tmp_pdf_path = tmp_pdf.name
+
+    tmp_docx_path = tmp_pdf_path.replace(".pdf", ".docx")
+    
+    cv = Converter(tmp_pdf_path)
+    cv.convert(tmp_docx_path)
+    cv.close()
+
+    with open(tmp_docx_path, "rb") as f:
+        docx_content = f.read()
+
+    # Cleanup
+    os.remove(tmp_pdf_path)
+    os.remove(tmp_docx_path)
+
+    return StreamingResponse(io.BytesIO(docx_content), 
+                             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                             headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"})
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
