@@ -130,6 +130,7 @@ async def get_providers():
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
+    print("pdf- upload")
     if not file.filename.endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported")
     return await rag.process_pdf(await file.read(), file.filename)
@@ -143,6 +144,7 @@ async def delete_document(doc_name: str): return rag.delete_document(doc_name)
 @app.post("/query")
 async def query(req: QueryRequest):
     # In chat mode with web search enabled, we allow querying without documents
+    print("query search")
     if not rag.has_documents() and not (req.web_search_enabled and req.mode == "chat"):
         raise HTTPException(400, "No documents uploaded. Please upload a PDF first.")
 
@@ -168,6 +170,7 @@ async def health():
 
 @app.post("/convert/text-to-pdf")
 async def text_to_pdf(text: str = Query(...)):
+    print("text to pdf")
     buffer = io.BytesIO()
     # 1. Create the Doc Template
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
@@ -216,6 +219,7 @@ async def text_to_pdf(text: str = Query(...)):
 
 @app.post("/convert/word-to-pdf")
 async def word_to_pdf(file: UploadFile = File(...)):
+    print("word to pdf")
     try:
         # Read Word file content
         content = await file.read()
