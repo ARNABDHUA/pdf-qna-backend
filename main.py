@@ -17,9 +17,6 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.platypus import Table, TableStyle
 from reportlab.lib import colors
 
-
-
-
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -107,11 +104,11 @@ rag = RAGEngine()
 
 class QueryRequest(BaseModel):
     question:           str
-    provider:           str  = "ollama"   # ollama | openai | anthropic | gemini | groq
+    provider:           str  = "ollama"
     model:              str  = ""
-    api_key:            str  = ""         # sent from frontend, never stored on server
-    mode:               str  = "chat"     # chat | legal
-    web_search_enabled: bool = False      # enable live web search augmentation
+    api_key:            str  = ""
+    mode:               str  = "chat"
+    web_search_enabled: bool = False
 
 @app.get("/")
 async def root(): return {"message": "RAG Agent API v3 running"}
@@ -139,11 +136,12 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def get_documents(): return {"documents": rag.get_documents()}
 
 @app.delete("/documents/{doc_name}")
-async def delete_document(doc_name: str): return rag.delete_document(doc_name)
+async def delete_document(doc_name: str):
+    # delete_document is now async because re-embedding uses the HF API
+    return await rag.delete_document(doc_name)
 
 @app.post("/query")
 async def query(req: QueryRequest):
-    # In chat mode with web search enabled, we allow querying without documents
     print("query search")
     if not rag.has_documents() and not (req.web_search_enabled and req.mode == "chat"):
         raise HTTPException(400, "No documents uploaded. Please upload a PDF first.")
@@ -153,7 +151,6 @@ async def query(req: QueryRequest):
             req.question, req.provider, req.model,
             req.api_key, req.mode, req.web_search_enabled
         ):
-            # Pass through the special web-searching sentinel so frontend can show a status
             if chunk == "__WEB_SEARCHING__":
                 yield f"data: {json.dumps({'searching': True})}\n\n"
             else:
@@ -172,40 +169,30 @@ async def health():
 async def text_to_pdf(text: str = Query(...)):
     print("text to pdf")
     buffer = io.BytesIO()
-    # 1. Create the Doc Template
     doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
     
-    # 2. Setup Styles
     styles = getSampleStyleSheet()
-    # Ensure Justify style exists
     if 'Justify' not in styles:
         styles.add(ParagraphStyle(name='Justify', alignment=TA_LEFT, fontSize=11, leading=14))
     
     story = []
     
-    # 3. Process the text into Paragraphs
     lines = text.split('\n')
     for line in lines:
         clean_line = line.strip()
         
-        # Handle Empty Lines
         if not clean_line:
             story.append(Spacer(1, 12))
             continue
             
-        # Handle Separators
         if clean_line.startswith('---'):
             story.append(Spacer(1, 6))
             continue
 
-        # Correctly convert **bold** to <b>bold</b> using Regex
-        # This prevents the "unclosed tag" error that caused your crash
         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
         
-        # Handle Headers
         if clean_line.startswith('###'):
             p_text = clean_line.replace('###', '').strip()
-            # Headers also need the formatting for any bold text inside them
             formatted_h = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', p_text)
             story.append(Paragraph(formatted_h, styles['Heading2']))
         else:
@@ -221,11 +208,8 @@ async def text_to_pdf(text: str = Query(...)):
 async def word_to_pdf(file: UploadFile = File(...)):
     print("word to pdf")
     try:
-        # Read Word file content
         content = await file.read()
         word_doc = Document(io.BytesIO(content))
-        
-        # Standardize extraction: preserve spacing between paragraphs
         full_text = "\n".join([para.text for para in word_doc.paragraphs])
         
         buffer = io.BytesIO()
@@ -237,9 +221,7 @@ async def word_to_pdf(file: UploadFile = File(...)):
         )
         styles = getSampleStyleSheet()
         
-        # Apply unified formatting
         story = format_text_to_story(full_text, styles)
-        
         pdf_doc.build(story)
         buffer.seek(0)
         
@@ -253,7 +235,6 @@ async def word_to_pdf(file: UploadFile = File(...)):
 
 @app.post("/convert/pdf-to-word")
 async def pdf_to_word(file: UploadFile = File(...)):
-    # Requires a temporary file because pdf2docx reads from path
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
         tmp_pdf.write(await file.read())
         tmp_pdf_path = tmp_pdf.name
@@ -267,7 +248,6 @@ async def pdf_to_word(file: UploadFile = File(...)):
     with open(tmp_docx_path, "rb") as f:
         docx_content = f.read()
 
-    # Cleanup
     os.remove(tmp_pdf_path)
     os.remove(tmp_docx_path)
 
@@ -275,10 +255,7 @@ async def pdf_to_word(file: UploadFile = File(...)):
                              media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                              headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"})
 
-# if __name__ == "__main__":
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
 if __name__ == "__main__":
-    print("🚀 Starting server...")   # DEBUG LINE
-    port = int(os.environ.get("PORT", 10000))
+    print("🚀 Starting server...")
+    port = int(os.environ.get("PORT", 80000))
     uvicorn.run(app, host="0.0.0.0", port=port)

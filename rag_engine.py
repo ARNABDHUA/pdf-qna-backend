@@ -6,13 +6,25 @@ from typing import AsyncGenerator, List, Dict, Any
 import httpx
 import pdfplumber
 import numpy as np
-from sentence_transformers import SentenceTransformer
+# from sentence_transformers import SentenceTransformer  # ← commented out: was loading model into memory locally
 import faiss
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-EMBEDDING_MODEL  = "all-MiniLM-L6-v2"
-CHUNK_SIZE       = 500
-CHUNK_OVERLAP    = 50
+
+# ── HuggingFace Inference API config ─────────────────────────────────────────
+# EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # ← commented out: was used by local SentenceTransformer
+HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # HF Inference API model ID
+# Load .env if present (optional), then fall back to hardcoded default key
+try:
+    from dotenv import load_dotenv
+    load_dotenv()                        # no-op if .env doesn't exist
+except ImportError:
+    pass                                 # python-dotenv not installed — that's fine
+HF_API_KEY = os.getenv("HF_API_KEY", "")
+HF_API_URL         = f"https://router.huggingface.co/hf-inference/models/{HF_EMBEDDING_MODEL}/pipeline/feature-extraction"
+
+CHUNK_SIZE    = 500
+CHUNK_OVERLAP = 50
 
 CLOUD_MODELS = {
     "openai": [
@@ -33,14 +45,14 @@ CLOUD_MODELS = {
         {"id": "gemini-1.5-flash",  "label": "Gemini 1.5 Flash"},
     ],
     "groq": [
-        {"id": "llama-3.3-70b-versatile",    "label": "LLaMA 3.3 70B"},
-        {"id": "llama-3.1-8b-instant",       "label": "LLaMA 3.1 8B Instant"},
-        {"id": "llama3-70b-8192",            "label": "LLaMA3 70B"},
-        {"id": "llama3-8b-8192",             "label": "LLaMA3 8B"},
-        {"id": "mixtral-8x7b-32768",         "label": "Mixtral 8x7B"},
-        {"id": "gemma2-9b-it",               "label": "Gemma2 9B"},
+        {"id": "llama-3.3-70b-versatile",       "label": "LLaMA 3.3 70B"},
+        {"id": "llama-3.1-8b-instant",          "label": "LLaMA 3.1 8B Instant"},
+        {"id": "llama3-70b-8192",               "label": "LLaMA3 70B"},
+        {"id": "llama3-8b-8192",                "label": "LLaMA3 8B"},
+        {"id": "mixtral-8x7b-32768",            "label": "Mixtral 8x7B"},
+        {"id": "gemma2-9b-it",                  "label": "Gemma2 9B"},
         {"id": "deepseek-r1-distill-llama-70b", "label": "DeepSeek R1 70B"},
-        {"id": "qwen-qwq-32b",               "label": "Qwen QwQ 32B"},
+        {"id": "qwen-qwq-32b",                  "label": "Qwen QwQ 32B"},
     ],
 }
 
@@ -127,14 +139,42 @@ def format_search_results(results: List[Dict[str, str]]) -> str:
     return "\n".join(parts)
 
 
+# ── HuggingFace Inference API embedding helper ────────────────────────────────
+
+async def hf_embed(texts: List[str]) -> np.ndarray:
+    """
+    Call the HuggingFace Inference API to get embeddings for a list of texts.
+    Returns a float32 numpy array of shape (len(texts), embedding_dim).
+    No model is loaded locally — all computation happens on HF servers.
+    """
+    headers = {"Content-Type": "application/json"}
+    if HF_API_KEY:
+        headers["Authorization"] = f"Bearer {HF_API_KEY}"
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            HF_API_URL,
+            headers=headers,
+            json={"inputs": texts, "options": {"wait_for_model": True}},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"HuggingFace API error {resp.status_code}: {resp.text[:200]}"
+            )
+        embeddings = resp.json()
+
+    # HF returns List[List[float]] for feature-extraction pipeline
+    return np.array(embeddings, dtype=np.float32)
+
+
 class RAGEngine:
     def __init__(self):
-        print("Loading embedding model...")
-        self.embedder  = SentenceTransformer(EMBEDDING_MODEL)
+        print("Using HuggingFace Inference API for embeddings (no local model loaded).")
+        # self.embedder = SentenceTransformer(EMBEDDING_MODEL)  # ← commented out: loaded model into RAM
         self.index     = None
         self.chunks:    List[Dict[str, Any]] = []
         self.documents: List[Dict[str, str]] = []
-        self.dimension = 384
+        self.dimension = 384   # all-MiniLM-L6-v2 output dimension
         self._init_index()
 
     def _init_index(self):
@@ -164,8 +204,11 @@ class RAGEngine:
             new_chunks = self._chunk_text(full, filename)
             if not new_chunks:
                 return {"error": "No chunks created from PDF"}
-            emb = np.array(self.embedder.encode(
-                [c["text"] for c in new_chunks], show_progress_bar=False), dtype=np.float32)
+
+            # ── HF API call replaces self.embedder.encode(...) ────────────────
+            # Old: emb = np.array(self.embedder.encode([c["text"] for c in new_chunks], show_progress_bar=False), dtype=np.float32)
+            emb = await hf_embed([c["text"] for c in new_chunks])
+
             self.index.add(emb)
             self.chunks.extend(new_chunks)
             self.documents.append({"name": filename, "pages": total,
@@ -179,7 +222,16 @@ class RAGEngine:
     def _retrieve(self, query: str, top_k: int = 5) -> List[Dict]:
         if self.index.ntotal == 0:
             return []
-        q = np.array(self.embedder.encode([query], show_progress_bar=False), dtype=np.float32)
+        # NOTE: _retrieve is called from query_stream which is async,
+        # so we embed synchronously here via a helper — see _retrieve_async below.
+        raise RuntimeError("Use _retrieve_async instead.")
+
+    async def _retrieve_async(self, query: str, top_k: int = 5) -> List[Dict]:
+        """Async retrieval using HF API for query embedding."""
+        if self.index.ntotal == 0:
+            return []
+        # Old: q = np.array(self.embedder.encode([query], show_progress_bar=False), dtype=np.float32)
+        q = await hf_embed([query])
         dists, idxs = self.index.search(q, min(top_k, self.index.ntotal))
         results = []
         for d, i in zip(dists[0], idxs[0]):
@@ -323,7 +375,8 @@ Produce a thorough legal analysis memorandum following the exact format specifie
 
         if mode == "legal":
             top_k  = 10
-            chunks = self._retrieve(
+            # Old: chunks = self._retrieve("legal analysis ...", top_k=top_k)
+            chunks = await self._retrieve_async(
                 "legal analysis contract parties clauses obligations rights", top_k=top_k)
             if not chunks:
                 yield "No relevant context found in the uploaded documents."
@@ -331,8 +384,8 @@ Produce a thorough legal analysis memorandum following the exact format specifie
             context = self._context(chunks)
         else:
             top_k  = 5
-            chunks = self._retrieve(question, top_k=top_k)
-            # In chat mode with web search, we can proceed even without doc chunks
+            # Old: chunks = self._retrieve(question, top_k=top_k)
+            chunks = await self._retrieve_async(question, top_k=top_k)
             if not chunks and not web_context:
                 yield "No relevant context found in the uploaded documents."
                 return
@@ -517,13 +570,13 @@ Produce a thorough legal analysis memorandum following the exact format specifie
     def has_documents(self) -> bool: return self.index.ntotal > 0
     def get_documents(self) -> List[Dict]: return self.documents
 
-    def delete_document(self, doc_name: str) -> Dict:
+    async def delete_document(self, doc_name: str) -> Dict:
         self.documents = [d for d in self.documents if d["name"] != doc_name]
         self.chunks    = [c for c in self.chunks    if c["source"] != doc_name]
         self._init_index()
         if self.chunks:
-            emb = np.array(self.embedder.encode(
-                [c["text"] for c in self.chunks], show_progress_bar=False), dtype=np.float32)
+            # Old: emb = np.array(self.embedder.encode([c["text"] for c in self.chunks], show_progress_bar=False), dtype=np.float32)
+            emb = await hf_embed([c["text"] for c in self.chunks])
             self.index.add(emb)
             for i, c in enumerate(self.chunks): c["chunk_id"] = i
         return {"success": True, "message": f"Deleted '{doc_name}'"}

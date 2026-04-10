@@ -11,3 +11,4 @@ numpy<2
 pdfplumber
 sentence-transformers
 faiss-cpu
+python-dotenv
