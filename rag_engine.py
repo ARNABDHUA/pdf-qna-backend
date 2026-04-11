@@ -60,70 +60,117 @@ CLOUD_MODELS = {
 # ── Simple web search via DuckDuckGo (no API key needed) ─────────────────────
 DDGS_API = "https://api.duckduckgo.com/"
 
+# async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+#     """
+#     Perform a web search using DuckDuckGo Instant Answer API + HTML scrape fallback.
+#     Returns list of {title, snippet, url}.
+#     """
+#     results = []
+#     try:
+#         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+#             # DuckDuckGo Instant Answer (JSON)
+#             resp = await client.get(DDGS_API, params={
+#                 "q": query, "format": "json", "no_redirect": "1",
+#                 "no_html": "1", "skip_disambig": "1"
+#             })
+#             data = resp.json()
+
+#             # AbstractText (single main result)
+#             if data.get("AbstractText"):
+#                 results.append({
+#                     "title": data.get("Heading", "Result"),
+#                     "snippet": data["AbstractText"][:400],
+#                     "url": data.get("AbstractURL", ""),
+#                 })
+
+#             # RelatedTopics
+#             for topic in data.get("RelatedTopics", []):
+#                 if len(results) >= max_results:
+#                     break
+#                 if isinstance(topic, dict) and topic.get("Text"):
+#                     results.append({
+#                         "title": topic.get("Text", "")[:80],
+#                         "snippet": topic.get("Text", "")[:400],
+#                         "url": topic.get("FirstURL", ""),
+#                     })
+
+#         # Fallback: DuckDuckGo HTML search (lite endpoint)
+#         if not results:
+#             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True,
+#                 headers={"User-Agent": "Mozilla/5.0 (compatible; RAGBot/1.0)"}) as client:
+#                 resp = await client.get("https://html.duckduckgo.com/html/",
+#                                         params={"q": query})
+#                 html = resp.text
+#                 # Very simple regex scrape of result snippets
+#                 snippets = re.findall(
+#                     r'<a class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+#                 titles   = re.findall(
+#                     r'<a class="result__a"[^>]*>(.*?)</a>', html, re.DOTALL)
+#                 urls     = re.findall(
+#                     r'<a class="result__a" href="([^"]+)"', html)
+#                 for i, snippet in enumerate(snippets[:max_results]):
+#                     clean_snippet = re.sub(r'<[^>]+>', '', snippet).strip()
+#                     clean_title   = re.sub(r'<[^>]+>', '', titles[i]).strip() if i < len(titles) else ""
+#                     url           = urls[i] if i < len(urls) else ""
+#                     if clean_snippet:
+#                         results.append({
+#                             "title": clean_title[:80],
+#                             "snippet": clean_snippet[:400],
+#                             "url": url,
+#                         })
+#     except Exception as e:
+#         results.append({
+#             "title": "Search Error",
+#             "snippet": f"Web search failed: {e}",
+#             "url": "",
+#         })
+#     return results[:max_results]
+
+
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
 async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-    """
-    Perform a web search using DuckDuckGo Instant Answer API + HTML scrape fallback.
-    Returns list of {title, snippet, url}.
-    """
+    if not TAVILY_API_KEY:
+        return [{"title": "Error", "snippet": "TAVILY_API_KEY not set", "url": ""}]
+    
     results = []
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            # DuckDuckGo Instant Answer (JSON)
-            resp = await client.get(DDGS_API, params={
-                "q": query, "format": "json", "no_redirect": "1",
-                "no_html": "1", "skip_disambig": "1"
-            })
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key":        TAVILY_API_KEY,
+                    "query":          query,
+                    "max_results":    max_results,
+                    "search_depth":   "basic",
+                    "include_answer": True,   # Tavily gives a direct answer too
+                }
+            )
             data = resp.json()
-
-            # AbstractText (single main result)
-            if data.get("AbstractText"):
+            
+            # Direct answer if available
+            if data.get("answer"):
                 results.append({
-                    "title": data.get("Heading", "Result"),
-                    "snippet": data["AbstractText"][:400],
-                    "url": data.get("AbstractURL", ""),
+                    "title":   "Direct Answer",
+                    "snippet": data["answer"],
+                    "url":     "",
                 })
-
-            # RelatedTopics
-            for topic in data.get("RelatedTopics", []):
-                if len(results) >= max_results:
-                    break
-                if isinstance(topic, dict) and topic.get("Text"):
-                    results.append({
-                        "title": topic.get("Text", "")[:80],
-                        "snippet": topic.get("Text", "")[:400],
-                        "url": topic.get("FirstURL", ""),
-                    })
-
-        # Fallback: DuckDuckGo HTML search (lite endpoint)
-        if not results:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; RAGBot/1.0)"}) as client:
-                resp = await client.get("https://html.duckduckgo.com/html/",
-                                        params={"q": query})
-                html = resp.text
-                # Very simple regex scrape of result snippets
-                snippets = re.findall(
-                    r'<a class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
-                titles   = re.findall(
-                    r'<a class="result__a"[^>]*>(.*?)</a>', html, re.DOTALL)
-                urls     = re.findall(
-                    r'<a class="result__a" href="([^"]+)"', html)
-                for i, snippet in enumerate(snippets[:max_results]):
-                    clean_snippet = re.sub(r'<[^>]+>', '', snippet).strip()
-                    clean_title   = re.sub(r'<[^>]+>', '', titles[i]).strip() if i < len(titles) else ""
-                    url           = urls[i] if i < len(urls) else ""
-                    if clean_snippet:
-                        results.append({
-                            "title": clean_title[:80],
-                            "snippet": clean_snippet[:400],
-                            "url": url,
-                        })
+            
+            # Individual results
+            for item in data.get("results", [])[:max_results]:
+                results.append({
+                    "title":   item.get("title", ""),
+                    "snippet": item.get("content", "")[:400],
+                    "url":     item.get("url", ""),
+                })
+                
     except Exception as e:
         results.append({
             "title": "Search Error",
             "snippet": f"Web search failed: {e}",
-            "url": "",
+            "url": ""
         })
+    
     return results[:max_results]
 
 
