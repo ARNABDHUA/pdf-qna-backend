@@ -553,6 +553,53 @@ async def pdf_to_word(file: UploadFile = File(...)):
                              media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                              headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"})
 
+
+class FollowUpRequest(BaseModel):
+    prompt:   str
+    provider: str = "ollama"
+    model:    str = ""
+    api_key:  str = ""
+
+@app.post("/followups")
+async def get_followups(req: FollowUpRequest):
+    """
+    Generate 3 follow-up question suggestions given a prompt.
+    Calls the LLM non-streaming and parses the JSON array response.
+    """
+    system = (
+        "You are a helpful assistant. When given a Q&A exchange, "
+        "you respond with ONLY a valid JSON array of exactly 3 short follow-up questions. "
+        "No explanation, no markdown, no preamble. Just the raw JSON array."
+    )
+
+    full_response = ""
+
+    async for chunk in rag.query_stream(
+        question=req.prompt,
+        provider=req.provider,
+        model=req.model,
+        api_key=req.api_key,
+        mode="chat",
+        web_search_enabled=False,
+    ):
+        if chunk and not chunk.startswith("__"):
+            full_response += chunk
+
+    # Parse JSON array from response
+    try:
+        # Strip markdown code fences if model wrapped it
+        cleaned = re.sub(r"```(?:json)?|```", "", full_response).strip()
+        # Find the first [...] block
+        match = re.search(r'\[.*?\]', cleaned, re.DOTALL)
+        if match:
+            suggestions = json.loads(match.group())
+            if isinstance(suggestions, list):
+                return {"suggestions": [str(s) for s in suggestions[:3]]}
+    except Exception:
+        pass
+
+    return {"suggestions": []}
+
 if __name__ == "__main__":
     print("🚀 Starting server...")
     port = int(os.environ.get("PORT", 8000))
