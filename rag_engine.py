@@ -60,73 +60,6 @@ CLOUD_MODELS = {
 # ── Simple web search via DuckDuckGo (no API key needed) ─────────────────────
 DDGS_API = "https://api.duckduckgo.com/"
 
-# async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
-#     """
-#     Perform a web search using DuckDuckGo Instant Answer API + HTML scrape fallback.
-#     Returns list of {title, snippet, url}.
-#     """
-#     results = []
-#     try:
-#         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-#             # DuckDuckGo Instant Answer (JSON)
-#             resp = await client.get(DDGS_API, params={
-#                 "q": query, "format": "json", "no_redirect": "1",
-#                 "no_html": "1", "skip_disambig": "1"
-#             })
-#             data = resp.json()
-
-#             # AbstractText (single main result)
-#             if data.get("AbstractText"):
-#                 results.append({
-#                     "title": data.get("Heading", "Result"),
-#                     "snippet": data["AbstractText"][:400],
-#                     "url": data.get("AbstractURL", ""),
-#                 })
-
-#             # RelatedTopics
-#             for topic in data.get("RelatedTopics", []):
-#                 if len(results) >= max_results:
-#                     break
-#                 if isinstance(topic, dict) and topic.get("Text"):
-#                     results.append({
-#                         "title": topic.get("Text", "")[:80],
-#                         "snippet": topic.get("Text", "")[:400],
-#                         "url": topic.get("FirstURL", ""),
-#                     })
-
-#         # Fallback: DuckDuckGo HTML search (lite endpoint)
-#         if not results:
-#             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True,
-#                 headers={"User-Agent": "Mozilla/5.0 (compatible; RAGBot/1.0)"}) as client:
-#                 resp = await client.get("https://html.duckduckgo.com/html/",
-#                                         params={"q": query})
-#                 html = resp.text
-#                 # Very simple regex scrape of result snippets
-#                 snippets = re.findall(
-#                     r'<a class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
-#                 titles   = re.findall(
-#                     r'<a class="result__a"[^>]*>(.*?)</a>', html, re.DOTALL)
-#                 urls     = re.findall(
-#                     r'<a class="result__a" href="([^"]+)"', html)
-#                 for i, snippet in enumerate(snippets[:max_results]):
-#                     clean_snippet = re.sub(r'<[^>]+>', '', snippet).strip()
-#                     clean_title   = re.sub(r'<[^>]+>', '', titles[i]).strip() if i < len(titles) else ""
-#                     url           = urls[i] if i < len(urls) else ""
-#                     if clean_snippet:
-#                         results.append({
-#                             "title": clean_title[:80],
-#                             "snippet": clean_snippet[:400],
-#                             "url": url,
-#                         })
-#     except Exception as e:
-#         results.append({
-#             "title": "Search Error",
-#             "snippet": f"Web search failed: {e}",
-#             "url": "",
-#         })
-#     return results[:max_results]
-
-
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
@@ -261,9 +194,13 @@ class RAGEngine:
             self.chunks.extend(new_chunks)
             self.documents.append({"name": filename, "pages": total,
                                    "chunks": len(new_chunks), "chars": len(full)})
+
+            # ── CHANGED: added ready_for_summary flag ─────────────────────────
             return {"success": True, "filename": filename, "pages": total,
                     "chunks": len(new_chunks),
-                    "message": f"Processed '{filename}' — {total} pages, {len(new_chunks)} chunks"}
+                    "message": f"Processed '{filename}' — {total} pages, {len(new_chunks)} chunks",
+                    "ready_for_summary": True}   # signal to frontend
+
         except Exception as e:
             return {"error": f"Failed to process PDF: {e}"}
 
@@ -423,7 +360,6 @@ Produce a thorough legal analysis memorandum following the exact format specifie
 
         if mode == "legal":
             top_k  = 10
-            # Old: chunks = self._retrieve("legal analysis ...", top_k=top_k)
             chunks = await self._retrieve_async(
                 "legal analysis contract parties clauses obligations rights", top_k=top_k)
             if not chunks:
@@ -432,7 +368,6 @@ Produce a thorough legal analysis memorandum following the exact format specifie
             context = self._context(chunks)
         else:
             top_k  = 5
-            # Old: chunks = self._retrieve(question, top_k=top_k)
             chunks = await self._retrieve_async(question, top_k=top_k)
             if not chunks and not web_context:
                 yield "No relevant context found in the uploaded documents."
@@ -628,6 +563,7 @@ Produce a thorough legal analysis memorandum following the exact format specifie
             self.index.add(emb)
             for i, c in enumerate(self.chunks): c["chunk_id"] = i
         return {"success": True, "message": f"Deleted '{doc_name}'"}
+
 
 
 

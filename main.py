@@ -385,6 +385,50 @@ class ContextRequest(BaseModel):
 @app.get("/")
 async def root(): return {"message": "RAG Agent API v3 running"}
 
+
+# ── models ────────────────────────────────────────────────────────────────────
+class SummarizeRequest(BaseModel):
+    doc_name:    str
+    provider:    str = "ollama"
+    model:       str = ""
+    api_key:     str = ""
+
+@app.post("/summarize")
+async def summarize_document(req: SummarizeRequest):
+    """
+    Generate a short summary for a document that has already been uploaded.
+    Returns {"summary": "..."} — caller stores it client-side.
+    """
+    # Retrieve top chunks from this specific document
+    all_chunks = [c for c in rag.chunks if c["source"] == req.doc_name]
+    if not all_chunks:
+        raise HTTPException(404, f"No chunks found for '{req.doc_name}'")
+
+    # Use first ~1500 words worth of text as context (cheap but effective)
+    sample_text = " ".join(c["text"] for c in all_chunks[:6])[:3000]
+
+    system_prompt = (
+        "You are a document analyst. Summarise the provided document excerpt in "
+        "2-3 sentences covering: document type, main parties or subjects, and the "
+        "primary purpose or key topics. Be concise and factual. "
+        "Output only the summary text — no preamble, no bullet points."
+    )
+    user_prompt = f"Document excerpt:\n\n{sample_text}\n\nSummary:"
+
+    full = ""
+    async for chunk in rag.query_stream(
+        question=user_prompt,
+        provider=req.provider,
+        model=req.model,
+        api_key=req.api_key,
+        mode="chat",
+        web_search_enabled=False,
+    ):
+        if chunk and not chunk.startswith("__"):
+            full += chunk
+
+    return {"summary": full.strip()}
+
 @app.get("/providers")
 async def get_providers():
     """Return cloud provider model lists + live Ollama models"""
@@ -599,6 +643,7 @@ async def get_followups(req: FollowUpRequest):
         pass
 
     return {"suggestions": []}
+
 
 if __name__ == "__main__":
     print("🚀 Starting server...")
