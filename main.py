@@ -273,38 +273,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-# ReportLab imports for Text-to-PDF
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-
 from reportlab.platypus import Table, TableStyle
 from reportlab.lib import colors
-
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.enums import TA_LEFT
 
-# Document conversion imports
 from docx import Document
 from pdf2docx import Converter
 import re
 
-# Your existing RAG import
 from rag_engine import RAGEngine, CLOUD_MODELS
 
 def format_text_to_story(text, styles):
     story = []
     lines = text.split('\n')
-    
-    # Custom Resume Styles
+
     section_title = ParagraphStyle(
-        'SectionTitle', parent=styles['Heading2'], fontSize=12, 
+        'SectionTitle', parent=styles['Heading2'], fontSize=12,
         spaceBefore=12, spaceAfter=6, borderPadding=2, fontName='Helvetica-Bold'
     )
-    
     body_text = ParagraphStyle(
         'BodyText', parent=styles['Normal'], fontSize=10, leading=12, spaceAfter=4
     )
@@ -315,23 +305,19 @@ def format_text_to_story(text, styles):
     for line in lines:
         clean_line = line.strip()
         if not clean_line: continue
-        
+
         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
 
-        # Detect Sections
         if clean_line in ["EXPERIENCE", "PROJECT", "EDUCATION", "SKILLS", "ACHIEVEMENTS"]:
-            # If we were in education, flush the table first
             if in_education_section and edu_data:
                 t = Table(edu_data, colWidths=[300, 150])
                 t.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'), ('FONTSIZE',(0,0),(-1,-1), 9)]))
                 story.append(t)
                 edu_data = []
-            
             in_education_section = (clean_line == "EDUCATION")
             story.append(Paragraph(clean_line, section_title))
             continue
 
-        # Handle Education Table Data
         if in_education_section:
             if ',' in clean_line:
                 parts = clean_line.split(',', 1)
@@ -340,20 +326,17 @@ def format_text_to_story(text, styles):
                 edu_data.append([Paragraph(clean_line, body_text), ""])
             continue
 
-        # Handle Bullet Points
         if clean_line.startswith(('-', '•', '*')):
             p_text = clean_line.lstrip('-•* ').strip()
             formatted_bullet = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', p_text)
             story.append(Paragraph(f"• {formatted_bullet}", body_text))
         else:
-            # Handle Header Info (Name, Contact)
             if any(x in clean_line for x in ["7076853097", "@gmail.com"]):
                 styles['Normal'].alignment = TA_LEFT
                 story.append(Paragraph(formatted_line, styles['Normal']))
             else:
                 story.append(Paragraph(formatted_line, body_text))
-                
-    # Final flush for Education if it was the last section
+
     if edu_data:
         t = Table(edu_data, colWidths=[300, 150])
         story.append(t)
@@ -361,11 +344,16 @@ def format_text_to_story(text, styles):
     return story
 
 
-app = FastAPI(title="RAG Agent API", version="3.0.0")
+app = FastAPI(title="RAG Agent API", version="3.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
 rag = RAGEngine()
+
+
+# ── Valid modes ───────────────────────────────────────────────────────────────
+VALID_MODES = {"chat", "legal", "drafting", "brief"}
+
 
 class QueryRequest(BaseModel):
     question:           str
@@ -375,38 +363,39 @@ class QueryRequest(BaseModel):
     mode:               str  = "chat"
     web_search_enabled: bool = False
 
-# ── NEW: used by frontend when provider is Ollama ─────────────────────────────
+
 class ContextRequest(BaseModel):
     question: str
     mode:     str = "chat"
 
-# ─────────────────────────────────────────────────────────────────────────────
 
-@app.get("/")
-async def root(): return {"message": "RAG Agent API v3 running"}
-
-
-# ── models ────────────────────────────────────────────────────────────────────
 class SummarizeRequest(BaseModel):
     doc_name:    str
     provider:    str = "ollama"
     model:       str = ""
     api_key:     str = ""
 
+
+class FollowUpRequest(BaseModel):
+    prompt:   str
+    provider: str = "ollama"
+    model:    str = ""
+    api_key:  str = ""
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/")
+async def root(): return {"message": "RAG Agent API v3.1 running"}
+
+
 @app.post("/summarize")
 async def summarize_document(req: SummarizeRequest):
-    """
-    Generate a short summary for a document that has already been uploaded.
-    Returns {"summary": "..."} — caller stores it client-side.
-    """
-    # Retrieve top chunks from this specific document
     all_chunks = [c for c in rag.chunks if c["source"] == req.doc_name]
     if not all_chunks:
         raise HTTPException(404, f"No chunks found for '{req.doc_name}'")
 
-    # Use first ~1500 words worth of text as context (cheap but effective)
     sample_text = " ".join(c["text"] for c in all_chunks[:6])[:3000]
-
     system_prompt = (
         "You are a document analyst. Summarise the provided document excerpt in "
         "2-3 sentences covering: document type, main parties or subjects, and the "
@@ -429,42 +418,47 @@ async def summarize_document(req: SummarizeRequest):
 
     return {"summary": full.strip()}
 
+
 @app.get("/providers")
 async def get_providers():
-    """Return cloud provider model lists + live Ollama models"""
     ollama_models = await rag.get_ollama_models()
     return {
-        "ollama":    {"models": ollama_models,           "needs_key": False},
+        "ollama":    {"models": ollama_models,             "needs_key": False},
         "openai":    {"models": CLOUD_MODELS["openai"],    "needs_key": True},
         "anthropic": {"models": CLOUD_MODELS["anthropic"], "needs_key": True},
         "gemini":    {"models": CLOUD_MODELS["gemini"],    "needs_key": True},
         "groq":      {"models": CLOUD_MODELS["groq"],      "needs_key": True},
     }
 
+
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    print("pdf- upload")
     if not file.filename.endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported")
     return await rag.process_pdf(await file.read(), file.filename)
 
+
 @app.get("/documents")
 async def get_documents(): return {"documents": rag.get_documents()}
+
 
 @app.delete("/documents/{doc_name}")
 async def delete_document(doc_name: str):
     return await rag.delete_document(doc_name)
 
+
 @app.post("/query")
 async def query(req: QueryRequest):
-    print("query search")
-    if not rag.has_documents() and not (req.web_search_enabled and req.mode == "chat"):
+    mode = req.mode if req.mode in VALID_MODES else "chat"
+
+    # Allow querying without docs when web search is on in chat mode
+    if not rag.has_documents() and not (req.web_search_enabled and mode == "chat"):
         raise HTTPException(400, "No documents uploaded. Please upload a PDF first.")
 
     async def generate():
         async for chunk in rag.query_stream(
             req.question, req.provider, req.model,
-            req.api_key, req.mode, req.web_search_enabled
+            req.api_key, mode, req.web_search_enabled
         ):
             if chunk == "__WEB_SEARCHING__":
                 yield f"data: {json.dumps({'searching': True})}\n\n"
@@ -474,32 +468,39 @@ async def query(req: QueryRequest):
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
-# ── NEW endpoint — retrieve context only, no LLM call ────────────────────────
+
 @app.post("/context")
 async def get_context(req: ContextRequest):
     """
-    Called by the frontend when provider is Ollama.
-    Retrieves relevant chunks from FAISS and returns them as plain text.
-    The frontend then sends this context to the local Ollama for generation.
-    rag_engine.py is NOT changed at all — we just call existing methods.
+    Retrieve relevant chunks from FAISS for Ollama local generation.
+    Supports all four modes: chat, legal, drafting, brief.
     """
     if not rag.has_documents():
         raise HTTPException(400, "No documents uploaded. Please upload a PDF first.")
 
-    if req.mode == "legal":
+    mode = req.mode if req.mode in VALID_MODES else "chat"
+
+    if mode == "legal":
         query = "legal analysis contract parties clauses obligations rights"
+        top_k = 10
+    elif mode == "drafting":
+        query = ("parties facts cause of action relief sought court jurisdiction "
+                 "plaint pleadings drafting conveyancing deed")
+        top_k = 10
+    elif mode == "brief":
+        query = ("case facts parties procedural history issues holding ratio decidendi "
+                 "judgment court ruling legal principle reasoning")
         top_k = 10
     else:
         query = req.question
         top_k = 5
 
     chunks = await rag._retrieve_async(query, top_k=top_k)
-
     if not chunks:
         raise HTTPException(404, "No relevant context found in the uploaded documents.")
 
     return {"context": rag._context(chunks)}
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 @app.get("/health")
 async def health():
@@ -509,30 +510,22 @@ async def health():
 
 @app.post("/convert/text-to-pdf")
 async def text_to_pdf(text: str = Query(...)):
-    print("text to pdf")
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
-    
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                            rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
     styles = getSampleStyleSheet()
     if 'Justify' not in styles:
         styles.add(ParagraphStyle(name='Justify', alignment=TA_LEFT, fontSize=11, leading=14))
-    
+
     story = []
-    
     lines = text.split('\n')
     for line in lines:
         clean_line = line.strip()
-        
         if not clean_line:
-            story.append(Spacer(1, 12))
-            continue
-            
+            story.append(Spacer(1, 12)); continue
         if clean_line.startswith('---'):
-            story.append(Spacer(1, 6))
-            continue
-
+            story.append(Spacer(1, 6)); continue
         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
-        
         if clean_line.startswith('###'):
             p_text = clean_line.replace('###', '').strip()
             formatted_h = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', p_text)
@@ -543,37 +536,29 @@ async def text_to_pdf(text: str = Query(...)):
 
     doc.build(story)
     buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/pdf", 
-                             headers={"Content-Disposition": "attachment; filename=formated_legal.pdf"})
+    return StreamingResponse(buffer, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=formatted_legal.pdf"})
+
 
 @app.post("/convert/word-to-pdf")
 async def word_to_pdf(file: UploadFile = File(...)):
-    print("word to pdf")
     try:
-        content = await file.read()
+        content  = await file.read()
         word_doc = Document(io.BytesIO(content))
         full_text = "\n".join([para.text for para in word_doc.paragraphs])
-        
         buffer = io.BytesIO()
-        pdf_doc = SimpleDocTemplate(
-            buffer, 
-            pagesize=letter,
-            rightMargin=50, leftMargin=50, 
-            topMargin=50, bottomMargin=50
-        )
+        pdf_doc = SimpleDocTemplate(buffer, pagesize=letter,
+                                    rightMargin=50, leftMargin=50,
+                                    topMargin=50, bottomMargin=50)
         styles = getSampleStyleSheet()
-        
-        story = format_text_to_story(full_text, styles)
+        story  = format_text_to_story(full_text, styles)
         pdf_doc.build(story)
         buffer.seek(0)
-        
-        return StreamingResponse(
-            buffer, 
-            media_type="application/pdf", 
-            headers={"Content-Disposition": "attachment; filename=consistent_output.pdf"}
-        )
+        return StreamingResponse(buffer, media_type="application/pdf",
+                                 headers={"Content-Disposition": "attachment; filename=consistent_output.pdf"})
     except Exception as e:
         raise HTTPException(500, detail=f"Formatting Error: {str(e)}")
+
 
 @app.post("/convert/pdf-to-word")
 async def pdf_to_word(file: UploadFile = File(...)):
@@ -582,7 +567,6 @@ async def pdf_to_word(file: UploadFile = File(...)):
         tmp_pdf_path = tmp_pdf.name
 
     tmp_docx_path = tmp_pdf_path.replace(".pdf", ".docx")
-    
     cv = Converter(tmp_pdf_path)
     cv.convert(tmp_docx_path)
     cv.close()
@@ -593,31 +577,19 @@ async def pdf_to_word(file: UploadFile = File(...)):
     os.remove(tmp_pdf_path)
     os.remove(tmp_docx_path)
 
-    return StreamingResponse(io.BytesIO(docx_content), 
+    return StreamingResponse(io.BytesIO(docx_content),
                              media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                              headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"})
 
 
-class FollowUpRequest(BaseModel):
-    prompt:   str
-    provider: str = "ollama"
-    model:    str = ""
-    api_key:  str = ""
-
 @app.post("/followups")
 async def get_followups(req: FollowUpRequest):
-    """
-    Generate 3 follow-up question suggestions given a prompt.
-    Calls the LLM non-streaming and parses the JSON array response.
-    """
     system = (
         "You are a helpful assistant. When given a Q&A exchange, "
         "you respond with ONLY a valid JSON array of exactly 3 short follow-up questions. "
         "No explanation, no markdown, no preamble. Just the raw JSON array."
     )
-
     full_response = ""
-
     async for chunk in rag.query_stream(
         question=req.prompt,
         provider=req.provider,
@@ -629,11 +601,8 @@ async def get_followups(req: FollowUpRequest):
         if chunk and not chunk.startswith("__"):
             full_response += chunk
 
-    # Parse JSON array from response
     try:
-        # Strip markdown code fences if model wrapped it
         cleaned = re.sub(r"```(?:json)?|```", "", full_response).strip()
-        # Find the first [...] block
         match = re.search(r'\[.*?\]', cleaned, re.DOTALL)
         if match:
             suggestions = json.loads(match.group())

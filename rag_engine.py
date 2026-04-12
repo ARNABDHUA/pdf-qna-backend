@@ -6,22 +6,18 @@ from typing import AsyncGenerator, List, Dict, Any
 import httpx
 import pdfplumber
 import numpy as np
-# from sentence_transformers import SentenceTransformer  # ← commented out: was loading model into memory locally
 import faiss
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# ── HuggingFace Inference API config ─────────────────────────────────────────
-# EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # ← commented out: was used by local SentenceTransformer
-HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"  # HF Inference API model ID
-# Load .env if present (optional), then fall back to hardcoded default key
+HF_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 try:
     from dotenv import load_dotenv
-    load_dotenv()                        # no-op if .env doesn't exist
+    load_dotenv()
 except ImportError:
-    pass                                 # python-dotenv not installed — that's fine
+    pass
 HF_API_KEY = os.getenv("HF_API_KEY", "")
-HF_API_URL         = f"https://router.huggingface.co/hf-inference/models/{HF_EMBEDDING_MODEL}/pipeline/feature-extraction"
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_EMBEDDING_MODEL}/pipeline/feature-extraction"
 
 CHUNK_SIZE    = 500
 CHUNK_OVERLAP = 50
@@ -46,7 +42,7 @@ CLOUD_MODELS = {
     ],
     "groq": [
         {"id": "llama-3.3-70b-versatile",       "label": "LLaMA 3.3 70B"},
-        {"id": "moonshotai/kimi-k2-instruct",       "label": "kimi k2"},
+        {"id": "moonshotai/kimi-k2-instruct",   "label": "kimi k2"},
         {"id": "llama-3.1-8b-instant",          "label": "LLaMA 3.1 8B Instant"},
         {"id": "llama3-70b-8192",               "label": "LLaMA3 70B"},
         {"id": "llama3-8b-8192",                "label": "LLaMA3 8B"},
@@ -57,15 +53,13 @@ CLOUD_MODELS = {
     ],
 }
 
-# ── Simple web search via DuckDuckGo (no API key needed) ─────────────────────
-DDGS_API = "https://api.duckduckgo.com/"
-
+DDGS_API     = "https://api.duckduckgo.com/"
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
 
 async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     if not TAVILY_API_KEY:
         return [{"title": "Error", "snippet": "TAVILY_API_KEY not set", "url": ""}]
-    
     results = []
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -76,34 +70,20 @@ async def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
                     "query":          query,
                     "max_results":    max_results,
                     "search_depth":   "basic",
-                    "include_answer": True,   # Tavily gives a direct answer too
+                    "include_answer": True,
                 }
             )
             data = resp.json()
-            
-            # Direct answer if available
             if data.get("answer"):
-                results.append({
-                    "title":   "Direct Answer",
-                    "snippet": data["answer"],
-                    "url":     "",
-                })
-            
-            # Individual results
+                results.append({"title": "Direct Answer", "snippet": data["answer"], "url": ""})
             for item in data.get("results", [])[:max_results]:
                 results.append({
                     "title":   item.get("title", ""),
                     "snippet": item.get("content", "")[:400],
                     "url":     item.get("url", ""),
                 })
-                
     except Exception as e:
-        results.append({
-            "title": "Search Error",
-            "snippet": f"Web search failed: {e}",
-            "url": ""
-        })
-    
+        results.append({"title": "Search Error", "snippet": f"Web search failed: {e}", "url": ""})
     return results[:max_results]
 
 
@@ -120,18 +100,10 @@ def format_search_results(results: List[Dict[str, str]]) -> str:
     return "\n".join(parts)
 
 
-# ── HuggingFace Inference API embedding helper ────────────────────────────────
-
 async def hf_embed(texts: List[str]) -> np.ndarray:
-    """
-    Call the HuggingFace Inference API to get embeddings for a list of texts.
-    Returns a float32 numpy array of shape (len(texts), embedding_dim).
-    No model is loaded locally — all computation happens on HF servers.
-    """
     headers = {"Content-Type": "application/json"}
     if HF_API_KEY:
         headers["Authorization"] = f"Bearer {HF_API_KEY}"
-
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
             HF_API_URL,
@@ -139,23 +111,18 @@ async def hf_embed(texts: List[str]) -> np.ndarray:
             json={"inputs": texts, "options": {"wait_for_model": True}},
         )
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"HuggingFace API error {resp.status_code}: {resp.text[:200]}"
-            )
+            raise RuntimeError(f"HuggingFace API error {resp.status_code}: {resp.text[:200]}")
         embeddings = resp.json()
-
-    # HF returns List[List[float]] for feature-extraction pipeline
     return np.array(embeddings, dtype=np.float32)
 
 
 class RAGEngine:
     def __init__(self):
         print("Using HuggingFace Inference API for embeddings (no local model loaded).")
-        # self.embedder = SentenceTransformer(EMBEDDING_MODEL)  # ← commented out: loaded model into RAM
         self.index     = None
         self.chunks:    List[Dict[str, Any]] = []
         self.documents: List[Dict[str, str]] = []
-        self.dimension = 384   # all-MiniLM-L6-v2 output dimension
+        self.dimension = 384
         self._init_index()
 
     def _init_index(self):
@@ -185,37 +152,21 @@ class RAGEngine:
             new_chunks = self._chunk_text(full, filename)
             if not new_chunks:
                 return {"error": "No chunks created from PDF"}
-
-            # ── HF API call replaces self.embedder.encode(...) ────────────────
-            # Old: emb = np.array(self.embedder.encode([c["text"] for c in new_chunks], show_progress_bar=False), dtype=np.float32)
             emb = await hf_embed([c["text"] for c in new_chunks])
-
             self.index.add(emb)
             self.chunks.extend(new_chunks)
             self.documents.append({"name": filename, "pages": total,
                                    "chunks": len(new_chunks), "chars": len(full)})
-
-            # ── CHANGED: added ready_for_summary flag ─────────────────────────
             return {"success": True, "filename": filename, "pages": total,
                     "chunks": len(new_chunks),
                     "message": f"Processed '{filename}' — {total} pages, {len(new_chunks)} chunks",
-                    "ready_for_summary": True}   # signal to frontend
-
+                    "ready_for_summary": True}
         except Exception as e:
             return {"error": f"Failed to process PDF: {e}"}
 
-    def _retrieve(self, query: str, top_k: int = 5) -> List[Dict]:
-        if self.index.ntotal == 0:
-            return []
-        # NOTE: _retrieve is called from query_stream which is async,
-        # so we embed synchronously here via a helper — see _retrieve_async below.
-        raise RuntimeError("Use _retrieve_async instead.")
-
     async def _retrieve_async(self, query: str, top_k: int = 5) -> List[Dict]:
-        """Async retrieval using HF API for query embedding."""
         if self.index.ntotal == 0:
             return []
-        # Old: q = np.array(self.embedder.encode([query], show_progress_bar=False), dtype=np.float32)
         q = await hf_embed([query])
         dists, idxs = self.index.search(q, min(top_k, self.index.ntotal))
         results = []
@@ -234,6 +185,7 @@ class RAGEngine:
     # ── System prompts ────────────────────────────────────────────────────────
 
     def _system(self, mode: str = "chat") -> str:
+
         if mode == "legal":
             return """You are a senior legal counsel and expert legal document analyst with 20+ years of experience.
 Your task is to produce a comprehensive legal analysis in professional legal draft format.
@@ -316,6 +268,219 @@ and does not constitute legal advice. Consult a qualified attorney for legal cou
 
 Base your analysis STRICTLY on the provided document context. Do not fabricate clauses or provisions not present in the document. If certain information is not available in the document, explicitly state "Not specified in the document."
 """
+
+        elif mode == "drafting":
+            return """You are a senior Indian advocate and expert legal draftsman with 25+ years of experience in civil, criminal, constitutional, matrimonial, and conveyancing matters before the Supreme Court of India, High Courts, and District Courts.
+
+You have mastered the Code of Civil Procedure 1908 (Orders VI–VIII), the Bharatiya Nagarik Suraksha Sanhita 2023, the Indian Evidence Act 1872, the Hindu Marriage Act 1955, the Transfer of Property Act 1882, the Registration Act 1908, the Consumer Protection Act 2019, the Contempt of Courts Act 1971, and all other major Indian statutes.
+
+Your drafting strictly follows the four fundamental rules of pleading under English and Indian law:
+1. State facts, not law — plead material facts, not legal conclusions.
+2. State ALL material facts and material facts only — every fact essential to the cause of action or defence must appear.
+3. State only the facts to be relied upon, NOT the evidence by which they are to be proved.
+4. State facts concisely, but with precision and certainty.
+
+STRICT OUTPUT FORMAT — produce the complete draft document in the following structure:
+
+═══════════════════════════════════════════════════
+[DOCUMENT TITLE — e.g., PLAINT / WRIT PETITION / SALE DEED / APPLICATION FOR BAIL]
+═══════════════════════════════════════════════════
+
+IN THE [COURT NAME]
+[CASE NUMBER / ORIGINAL SUIT NO. / WRIT PETITION NO.]
+
+[PARTY DESIGNATION — e.g., BETWEEN:]
+[Petitioner / Plaintiff Name] ...... Petitioner/Plaintiff
+                    versus
+[Respondent / Defendant Name] ...... Respondent/Defendant
+
+───────────────────────────────────────────────────
+MOST RESPECTFULLY SHOWETH:
+───────────────────────────────────────────────────
+
+[Numbered paragraphs — each allegation in a separate paragraph. State only material facts. Each paragraph: one fact, one topic.]
+
+1. [Relationship and status of the parties]
+2. [Background facts / history of the matter]
+3. [Specific acts constituting the cause of action or offence]
+4. [Dates, amounts, and particulars stated precisely]
+5. [Prior steps taken / notices issued if any]
+6. [Grounds relied upon — numbered sub-grounds if multiple]
+7. [Jurisdiction of the court]
+8. [Limitation — that the suit/petition is within limitation]
+
+───────────────────────────────────────────────────
+PRAYER
+───────────────────────────────────────────────────
+It is, therefore, most respectfully prayed that this Hon'ble Court may be pleased to:
+
+(a) [Primary relief sought]
+(b) [Interim / interlocutory relief if any]
+(c) [Costs]
+(d) [Any other relief the Hon'ble Court deems fit and proper in the facts and circumstances of the case]
+
+───────────────────────────────────────────────────
+VERIFICATION
+───────────────────────────────────────────────────
+I, [Name], [Designation], the [Petitioner/Plaintiff] above named do hereby verify that the contents of paragraphs ___ to ___ above are true to my personal knowledge and the contents of paragraphs ___ are true to the best of my information received and believed to be true. No part of it is false and nothing material has been concealed therefrom.
+
+Verified at [Place] on this ___ day of [Month], [Year].
+
+[Signature]
+[Name of Deponent]
+
+───────────────────────────────────────────────────
+PLACE: [City]
+DATE:  [Date]
+
+[ADVOCATE'S NAME]
+[ENROLLMENT NO.]
+Counsel for the Petitioner/Plaintiff
+───────────────────────────────────────────────────
+DISCLAIMER: This draft is generated by an AI system for informational purposes only and does not constitute legal advice. Verify all facts, dates, and statutory references with a qualified advocate before filing.
+═══════════════════════════════════════════════════
+
+CRITICAL DRAFTING RULES YOU MUST FOLLOW:
+- NEVER plead conclusions of law as facts (e.g., do not write "the defendant negligently did X" — instead write the specific act and let the court infer negligence).
+- NEVER use narrative or argumentative language in the fact paragraphs.
+- Each paragraph must deal with ONE fact or ONE set of closely related facts only.
+- Dates, sums, and numbers must be written in both figures and words.
+- Parties must be identified by their actual relationship/status (employer/employee, landlord/tenant, buyer/seller, husband/wife) — not just as "plaintiff/defendant".
+- Every ground must be separately numbered and clearly stated.
+- For conveyancing deeds: include all component parts — description of property, consideration, recitals, operative words, conditions, covenants, attestation, and registration details.
+- If any information is not provided in the document context, write [TO BE FILLED BY INSTRUCTING ADVOCATE] at that point — do not fabricate facts.
+"""
+
+        elif mode == "brief":
+            return """You are an experienced Indian law professor, senior advocate, and expert case analyst with 25+ years of experience briefing landmark judgments for the Supreme Court of India, High Courts, and academic institutions.
+
+You brief cases following the standard methodology taught at the Faculty of Law, University of Delhi and all NLUs, which requires:
+- Identifying legally relevant facts (facts that tend to prove or disprove the issue before court)
+- Distinguishing between substantive issues (point of law + key facts) and procedural issues (what the lower court did wrong)
+- Extracting the precise ratio decidendi from the obiter dicta
+- Critically assessing the soundness, consistency, and policy implications of the judgment
+
+STRICT OUTPUT FORMAT — produce the complete case brief in the following structure:
+
+═══════════════════════════════════════════════════
+CASE BRIEF
+═══════════════════════════════════════════════════
+
+───────────────────────────────────────────────────
+I. HEADING
+───────────────────────────────────────────────────
+Case Name    : [Full case name]
+Court        : [Court that decided the case]
+Date Decided : [Date of judgment]
+Citation     : [AIR / SCC / SCR / regional reporter citation]
+Coram        : [Name(s) of judge(s)]
+Subject Area : [Constitutional Law / Contract / Tort / Criminal / etc.]
+
+───────────────────────────────────────────────────
+II. STATEMENT OF FACTS
+───────────────────────────────────────────────────
+A. Parties and Their Relationship:
+[Identify each party by their actual relationship/status — e.g., employer/employee, landlord/tenant, husband/wife, state/citizen — NOT merely as appellant/respondent]
+
+B. Legally Relevant Facts:
+[Facts that tend to prove or disprove the issues before the court — what happened BEFORE the parties entered the judicial system, stated chronologically and concisely]
+
+C. Procedurally Significant Facts:
+• Cause of Action (C/A): [The specific legal wrong / law the plaintiff claimed was broken]
+• Relief Sought: [What the plaintiff / petitioner asked the court to grant]
+• Defence Raised: [Key defences, if any, raised by the defendant / respondent]
+
+───────────────────────────────────────────────────
+III. PROCEDURAL HISTORY
+───────────────────────────────────────────────────
+[Trace the journey of the case from the original court to the present court. For each court:]
+• Trial Court: [Decision + reasoning, if available]
+• [Intermediate Appellate Court, if any]: [Decision + reasoning]
+• Present Court: [How the matter came before this court]
+• Damages / relief awarded at each stage (if relevant)
+• Who appealed at each stage and on what ground
+
+───────────────────────────────────────────────────
+IV. ISSUES
+───────────────────────────────────────────────────
+A. Substantive Issue(s):
+[Each issue must contain TWO parts: (i) the point of law in dispute + (ii) the key facts of THIS case relating to that point]
+
+Issue 1: Whether [point of law] when [key facts specific to this case]?
+Issue 2: Whether [point of law] when [key facts specific to this case]?
+
+B. Procedural Issue(s) [if applicable]:
+[What did the appealing party claim the lower court did wrong — e.g., wrongly admitted evidence, gave improper jury instructions, wrongly granted/refused summary judgment?]
+
+───────────────────────────────────────────────────
+V. JUDGMENT
+───────────────────────────────────────────────────
+[The court's final decision as to the rights of the parties — Affirmed / Reversed / Reversed with directions / Modified]
+[State the specific order made]
+
+───────────────────────────────────────────────────
+VI. HOLDING
+───────────────────────────────────────────────────
+[A precise statement of law — the court's answer to each issue. Should read as the positive or negative answer to each Issue stated in Section IV]
+
+Holding on Issue 1: [Answer]
+Holding on Issue 2: [Answer, if applicable]
+
+───────────────────────────────────────────────────
+VII. RULE OF LAW / LEGAL PRINCIPLE
+───────────────────────────────────────────────────
+[The rule of law the court applied to determine the substantive rights of the parties]
+• Source: [Statute / Common law / Constitutional provision / Prior case rule / Synthesis of precedents]
+• Text of Rule: [State the rule — express or implied from the opinion]
+
+───────────────────────────────────────────────────
+VIII. REASONING / RATIO DECIDENDI
+───────────────────────────────────────────────────
+[The heart of the brief — explain HOW the court applied the rule to the specific facts]
+
+A. Syllogistic Application:
+[Major premise (rule of law) + Minor premise (facts of this case) → Conclusion]
+
+B. Policy / Social Desirability Arguments:
+[What policy or social reasons did the court give to justify its decision? Why was this decision socially desirable?]
+
+C. Precedents Relied Upon:
+[Key cases the court cited and how it distinguished / followed / overruled them]
+
+───────────────────────────────────────────────────
+IX. CONCURRING / DISSENTING OPINIONS [if any]
+───────────────────────────────────────────────────
+Concurring — [Judge's name]: [Agrees with decision but differs on reasoning — state why]
+Dissenting — [Judge's name]: [Disagrees with decision — state the grounds and reasoning]
+
+───────────────────────────────────────────────────
+X. CRITICAL COMMENTS & PERSONAL ASSESSMENT
+───────────────────────────────────────────────────
+A. Soundness of Reasoning:
+[Is the court's reasoning logically consistent? Are there internal contradictions?]
+
+B. Consistency with Precedent:
+[How does this case fit with the series of cases in this area? Does it depart from or align with established doctrine?]
+
+C. Political / Economic / Social Impact:
+[What are the broader implications of this decision for society, policy, or the legal system?]
+
+D. Personal Assessment:
+[Do you agree or disagree with the outcome and reasoning? Give reasons.]
+
+───────────────────────────────────────────────────
+DISCLAIMER: This case brief is generated by an AI system for academic and informational purposes only. Always read the original judgment and consult primary sources before relying on this brief.
+═══════════════════════════════════════════════════
+
+CRITICAL BRIEFING RULES YOU MUST FOLLOW:
+- In Section II, NEVER refer to parties ONLY as "appellant/respondent" or "plaintiff/defendant" — always identify their actual relationship (e.g., "dismissed employee", "landlord", "state government").
+- The Substantive Issue in Section IV MUST contain both the legal point AND the specific facts of this case — a generic legal question without the case-specific facts is WRONG.
+- The Holding in Section VI must directly answer each Issue from Section IV — it should read as the positive or negative statement of the issue.
+- Ratio decidendi in Section VIII must be clearly distinguished from obiter dicta.
+- Do NOT accept the court's opinion blindly — Section X requires a genuine critical assessment.
+- If any information is not available from the provided context, state "Not ascertainable from available context" — do NOT fabricate facts or citations.
+"""
+
         else:
             return ("You are a helpful AI assistant. Answer the user's question based on the "
                     "provided context. If web search results are included, use them to supplement "
@@ -326,6 +491,7 @@ Base your analysis STRICTLY on the provided document context. Do not fabricate c
 
     def _user_msg(self, question: str, context: str, mode: str = "chat",
                   web_context: str = "") -> str:
+
         if mode == "legal":
             return f"""DOCUMENT CONTEXT:
 {context}
@@ -334,14 +500,30 @@ TASK: {question if question.strip() else "Perform a complete legal analysis of t
 
 Produce a thorough legal analysis memorandum following the exact format specified in your instructions."""
 
-        # Chat mode — combine doc context + web context if present
-        parts = []
-        if context:
-            parts.append(f"DOCUMENT CONTEXT:\n{context}")
-        if web_context:
-            parts.append(f"WEB SEARCH CONTEXT:\n{web_context}")
-        combined = "\n\n".join(parts)
-        return f"{combined}\n\nQUESTION: {question}\n\nANSWER:"
+        elif mode == "drafting":
+            return f"""DOCUMENT CONTEXT (uploaded legal material / facts provided by the instructing advocate):
+{context}
+
+DRAFTING INSTRUCTION: {question if question.strip() else "Draft a complete, court-ready legal document based on all facts and details found in the document context above."}
+
+Using ONLY the facts, parties, reliefs, and details found in the document context above, produce a complete, court-ready legal draft following the exact format and all drafting rules specified in your instructions. Do not invent any facts not present in the context. Where information is missing, insert [TO BE FILLED BY INSTRUCTING ADVOCATE]."""
+
+        elif mode == "brief":
+            return f"""CASE MATERIAL / JUDGMENT CONTEXT:
+{context}
+
+BRIEFING INSTRUCTION: {question if question.strip() else "Prepare a complete, professional case brief of the case described in the document context above."}
+
+Using the case material provided above, produce a thorough, structured case brief following the exact format and all briefing rules specified in your instructions. If any section cannot be completed from the available material, state "Not ascertainable from available context" for that section. Do not fabricate citations, judge names, or facts not present in the material."""
+
+        else:
+            parts = []
+            if context:
+                parts.append(f"DOCUMENT CONTEXT:\n{context}")
+            if web_context:
+                parts.append(f"WEB SEARCH CONTEXT:\n{web_context}")
+            combined = "\n\n".join(parts)
+            return f"{combined}\n\nQUESTION: {question}\n\nANSWER:"
 
     # ── Main query stream entry point ─────────────────────────────────────────
 
@@ -352,30 +534,37 @@ Produce a thorough legal analysis memorandum following the exact format specifie
 
         web_context = ""
 
-        # Perform web search if enabled and in chat mode
         if web_search_enabled and mode == "chat":
             yield "__WEB_SEARCHING__"
             search_results = await web_search(question)
             web_context = format_search_results(search_results)
 
+        # Retrieval strategy per mode
         if mode == "legal":
             top_k  = 10
             chunks = await self._retrieve_async(
                 "legal analysis contract parties clauses obligations rights", top_k=top_k)
-            if not chunks:
-                yield "No relevant context found in the uploaded documents."
-                return
-            context = self._context(chunks)
+        elif mode == "drafting":
+            top_k  = 10
+            chunks = await self._retrieve_async(
+                "parties facts cause of action relief sought court jurisdiction "
+                "plaint pleadings drafting conveyancing deed", top_k=top_k)
+        elif mode == "brief":
+            top_k  = 10
+            chunks = await self._retrieve_async(
+                "case facts parties procedural history issues holding ratio decidendi "
+                "judgment court ruling legal principle reasoning", top_k=top_k)
         else:
             top_k  = 5
             chunks = await self._retrieve_async(question, top_k=top_k)
-            if not chunks and not web_context:
-                yield "No relevant context found in the uploaded documents."
-                return
-            context = self._context(chunks) if chunks else ""
 
-        system = self._system(mode)
-        user   = self._user_msg(question, context, mode, web_context)
+        if not chunks and not web_context:
+            yield "No relevant context found in the uploaded documents."
+            return
+
+        context = self._context(chunks) if chunks else ""
+        system  = self._system(mode)
+        user    = self._user_msg(question, context, mode, web_context)
 
         if provider == "ollama":
             async for t in self._ollama_msg(system, user, model): yield t
@@ -490,28 +679,19 @@ Produce a thorough legal analysis memorandum following the exact format specifie
                 yield f"Error: {e}"
 
     async def _groq_msg(self, system: str, user: str, model: str, api_key: str):
-        """Groq uses an OpenAI-compatible API with streaming support."""
         if not api_key:
             yield "Error: Groq API key is required."; return
         payload = {
-            "model": model,
-            "stream": True,
-            "temperature": 0.1,
-            "max_tokens": 4096,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
+            "model": model, "stream": True, "temperature": 0.1, "max_tokens": 4096,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user",   "content": user}],
         }
         async with httpx.AsyncClient(timeout=180.0) as client:
             try:
                 async with client.stream(
-                    "POST",
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    "POST", "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}",
+                             "Content-Type": "application/json"},
                     json=payload,
                 ) as resp:
                     if resp.status_code != 200:
@@ -520,14 +700,11 @@ Produce a thorough legal analysis memorandum following the exact format specifie
                     async for line in resp.aiter_lines():
                         if line.startswith("data: "):
                             chunk = line[6:]
-                            if chunk.strip() == "[DONE]":
-                                break
+                            if chunk.strip() == "[DONE]": break
                             try:
                                 delta = json.loads(chunk)["choices"][0]["delta"].get("content", "")
-                                if delta:
-                                    yield delta
-                            except (json.JSONDecodeError, KeyError):
-                                continue
+                                if delta: yield delta
+                            except (json.JSONDecodeError, KeyError): continue
             except httpx.ConnectError:
                 yield "Error: Cannot connect to Groq API."
             except Exception as e:
@@ -558,11 +735,11 @@ Produce a thorough legal analysis memorandum following the exact format specifie
         self.chunks    = [c for c in self.chunks    if c["source"] != doc_name]
         self._init_index()
         if self.chunks:
-            # Old: emb = np.array(self.embedder.encode([c["text"] for c in self.chunks], show_progress_bar=False), dtype=np.float32)
             emb = await hf_embed([c["text"] for c in self.chunks])
             self.index.add(emb)
             for i, c in enumerate(self.chunks): c["chunk_id"] = i
         return {"success": True, "message": f"Deleted '{doc_name}'"}
+
 
 
 
