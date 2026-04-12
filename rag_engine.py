@@ -541,16 +541,16 @@ Using the case material provided above, produce a thorough, structured case brie
 
         # Retrieval strategy per mode
         if mode == "legal":
-            top_k  = 10
+            top_k  = 5
             chunks = await self._retrieve_async(
                 "legal analysis contract parties clauses obligations rights", top_k=top_k)
         elif mode == "drafting":
-            top_k  = 10
+            top_k  = 5
             chunks = await self._retrieve_async(
                 "parties facts cause of action relief sought court jurisdiction "
                 "plaint pleadings drafting conveyancing deed", top_k=top_k)
         elif mode == "brief":
-            top_k  = 10
+            top_k  = 5
             chunks = await self._retrieve_async(
                 "case facts parties procedural history issues holding ratio decidendi "
                 "judgment court ruling legal principle reasoning", top_k=top_k)
