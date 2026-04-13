@@ -1,8 +1,5 @@
 """
 collab_routes.py — Collaborative Session API
-Plug this into your existing FastAPI app with:
-    from collab_routes import collab_router
-    app.include_router(collab_router)
 """
 
 import os
@@ -23,23 +20,34 @@ MONGO_URL = os.getenv("MONGODB_URL", "")
 _mongo_client: Optional[AsyncIOMotorClient] = None
 
 
+def _make_tls_context() -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(certifi.where())
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+    except ssl.SSLError:
+        ctx.set_ciphers("DEFAULT")
+    return ctx
+
+
 def get_db():
     global _mongo_client
     if _mongo_client is None:
         if not MONGO_URL:
             raise RuntimeError("MONGODB_URL environment variable is not set")
-        try:
-            _mongo_client = AsyncIOMotorClient(
-                MONGO_URL,
-                serverSelectionTimeoutMS=10000,
-                socketTimeoutMS=20000,
-                connectTimeoutMS=20000,
-                tls=True,
-                tlsCAFile=certifi.where(),
-                retryWrites=True,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to connect to MongoDB: {e}")
+        tls_ctx = _make_tls_context()
+        _mongo_client = AsyncIOMotorClient(
+            MONGO_URL,
+            serverSelectionTimeoutMS=10000,
+            socketTimeoutMS=20000,
+            connectTimeoutMS=20000,
+            ssl_context=tls_ctx,
+            retryWrites=True,
+            w="majority",
+        )
     return _mongo_client["qna_ai_collab"]
 
 
@@ -75,13 +83,12 @@ class PatchTitleRequest(BaseModel):
 collab_router = APIRouter(prefix="/collab", tags=["Collaborative"])
 
 
-# ── Helper: sanitise a MongoDB doc for JSON response ─────────────────────────
+# ── Helper ────────────────────────────────────────────────────────────────────
 def _sanitise(doc: dict) -> dict:
     doc["id"] = str(doc.pop("_id", ""))
     for key in ("created_at", "updated_at", "expires_at"):
         if key in doc and isinstance(doc[key], datetime):
             doc[key] = doc[key].isoformat()
-    # Sanitise nested messages list
     for msg in doc.get("messages", []):
         for k, v in msg.items():
             if isinstance(v, datetime):
@@ -89,11 +96,10 @@ def _sanitise(doc: dict) -> dict:
     return doc
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @collab_router.post("/sessions")
 async def create_collab_session(req: CreateSessionRequest):
-    """Create a new collaborative session and return its share link ID."""
     db = get_db()
     session_id = str(uuid.uuid4())
     now = datetime.utcnow()
@@ -124,7 +130,6 @@ async def create_collab_session(req: CreateSessionRequest):
 
 @collab_router.get("/sessions/{session_id}")
 async def get_collab_session(session_id: str):
-    """Fetch a collaborative session by ID."""
     db = get_db()
 
     try:
@@ -143,7 +148,6 @@ async def get_collab_session(session_id: str):
 
 @collab_router.post("/sessions/{session_id}/messages")
 async def add_message_to_session(session_id: str, req: AddMessageRequest):
-    """Append a message to a collaborative session."""
     db = get_db()
 
     try:
@@ -177,7 +181,6 @@ async def add_message_to_session(session_id: str, req: AddMessageRequest):
 
 @collab_router.patch("/sessions/{session_id}/messages/{msg_id}")
 async def update_message_in_session(session_id: str, msg_id: str, req: Request):
-    """Update an AI message content (used during streaming)."""
     db = get_db()
 
     try:
@@ -207,10 +210,6 @@ async def update_message_in_session(session_id: str, msg_id: str, req: Request):
 
 @collab_router.get("/sessions/{session_id}/poll")
 async def poll_session(session_id: str, since: Optional[float] = None):
-    """
-    Long-poll endpoint — returns new messages since `since` (unix timestamp).
-    Waits up to 20 s for new content, then returns empty if nothing arrives.
-    """
     db = get_db()
     loop     = asyncio.get_event_loop()
     deadline = loop.time() + 20
@@ -231,7 +230,6 @@ async def poll_session(session_id: str, since: Optional[float] = None):
             else messages
         )
 
-        # Sanitise any datetime values inside messages
         for msg in new_msgs:
             for k, v in msg.items():
                 if isinstance(v, datetime):
@@ -262,7 +260,6 @@ async def poll_session(session_id: str, since: Optional[float] = None):
 
 @collab_router.patch("/sessions/{session_id}/title")
 async def update_session_title(session_id: str, req: PatchTitleRequest):
-    """Rename a collaborative session."""
     db = get_db()
 
     try:
@@ -281,7 +278,6 @@ async def update_session_title(session_id: str, req: PatchTitleRequest):
 
 @collab_router.post("/sessions/{session_id}/join")
 async def join_session(session_id: str, req: Request):
-    """Record a participant joining the session."""
     db = get_db()
 
     try:
@@ -306,7 +302,6 @@ async def join_session(session_id: str, req: Request):
 
 @collab_router.delete("/sessions/{session_id}")
 async def delete_collab_session(session_id: str):
-    """Delete a collaborative session."""
     db = get_db()
 
     try:
