@@ -6,35 +6,47 @@ Plug this into your existing FastAPI app with:
 """
 
 import os
+import ssl
 import uuid
 import asyncio
+import certifi
 from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
 
 # ── MongoDB connection ─────────────────────────────────────────────────────────
-MONGO_URL = os.getenv(
-    "MONGODB_URL",
-    ""
-)
+MONGO_URL = os.getenv("MONGODB_URL", "")
 
 _mongo_client: Optional[AsyncIOMotorClient] = None
+
 
 def get_db():
     global _mongo_client
     if _mongo_client is None:
-        _mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=10000)
+        if not MONGO_URL:
+            raise RuntimeError("MONGODB_URL environment variable is not set")
+        try:
+            _mongo_client = AsyncIOMotorClient(
+                MONGO_URL,
+                serverSelectionTimeoutMS=10000,
+                socketTimeoutMS=20000,
+                connectTimeoutMS=20000,
+                tls=True,
+                tlsCAFile=certifi.where(),
+                retryWrites=True,
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to connect to MongoDB: {e}")
     return _mongo_client["qna_ai_collab"]
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
 
 class CollabMessage(BaseModel):
-    role: str                   # "user" | "ai"
+    role: str
     content: str
     author: Optional[str] = "Anonymous"
     provider: Optional[str] = None
@@ -43,21 +55,41 @@ class CollabMessage(BaseModel):
     timestamp: Optional[float] = None
     msg_id: Optional[str] = None
 
+
 class CreateSessionRequest(BaseModel):
     title: Optional[str] = "Collaborative Session"
     owner: Optional[str] = "Anonymous"
     messages: Optional[List[dict]] = []
 
+
 class AddMessageRequest(BaseModel):
     session_id: str
     message: CollabMessage
 
+
 class PatchTitleRequest(BaseModel):
     title: str
+
 
 # ── Router ─────────────────────────────────────────────────────────────────────
 collab_router = APIRouter(prefix="/collab", tags=["Collaborative"])
 
+
+# ── Helper: sanitise a MongoDB doc for JSON response ─────────────────────────
+def _sanitise(doc: dict) -> dict:
+    doc["id"] = str(doc.pop("_id", ""))
+    for key in ("created_at", "updated_at", "expires_at"):
+        if key in doc and isinstance(doc[key], datetime):
+            doc[key] = doc[key].isoformat()
+    # Sanitise nested messages list
+    for msg in doc.get("messages", []):
+        for k, v in msg.items():
+            if isinstance(v, datetime):
+                msg[k] = v.isoformat()
+    return doc
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @collab_router.post("/sessions")
 async def create_collab_session(req: CreateSessionRequest):
@@ -67,13 +99,13 @@ async def create_collab_session(req: CreateSessionRequest):
     now = datetime.utcnow()
 
     doc = {
-        "_id":        session_id,
-        "title":      req.title or "Collaborative Session",
-        "owner":      req.owner or "Anonymous",
-        "messages":   req.messages or [],
-        "created_at": now,
-        "updated_at": now,
-        "expires_at": now + timedelta(days=7),   # auto-expire after 7 days
+        "_id":          session_id,
+        "title":        req.title or "Collaborative Session",
+        "owner":        req.owner or "Anonymous",
+        "messages":     req.messages or [],
+        "created_at":   now,
+        "updated_at":   now,
+        "expires_at":   now + timedelta(days=7),
         "participants": [],
         "active_users": 0,
     }
@@ -81,7 +113,7 @@ async def create_collab_session(req: CreateSessionRequest):
     try:
         await db.sessions.insert_one(doc)
     except Exception as e:
-        raise HTTPException(500, f"Failed to create session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create session: {e}")
 
     return {
         "session_id": session_id,
@@ -94,66 +126,81 @@ async def create_collab_session(req: CreateSessionRequest):
 async def get_collab_session(session_id: str):
     """Fetch a collaborative session by ID."""
     db = get_db()
-    doc = await db.sessions.find_one({"_id": session_id})
+
+    try:
+        doc = await db.sessions.find_one({"_id": session_id})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
     if not doc:
-        raise HTTPException(404, "Session not found or expired")
+        raise HTTPException(status_code=404, detail="Session not found or expired")
 
-    # Check expiry
     if doc.get("expires_at") and datetime.utcnow() > doc["expires_at"]:
-        raise HTTPException(410, "Session has expired")
+        raise HTTPException(status_code=410, detail="Session has expired")
 
-    doc["id"] = doc.pop("_id")
-    # Convert datetime objects
-    for key in ("created_at", "updated_at", "expires_at"):
-        if key in doc and isinstance(doc[key], datetime):
-            doc[key] = doc[key].isoformat()
-
-    return doc
+    return _sanitise(doc)
 
 
 @collab_router.post("/sessions/{session_id}/messages")
 async def add_message_to_session(session_id: str, req: AddMessageRequest):
     """Append a message to a collaborative session."""
     db = get_db()
-    doc = await db.sessions.find_one({"_id": session_id})
+
+    try:
+        doc = await db.sessions.find_one({"_id": session_id})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
     if not doc:
-        raise HTTPException(404, "Session not found")
+        raise HTTPException(status_code=404, detail="Session not found")
 
     msg = req.message.dict()
     msg["timestamp"] = msg.get("timestamp") or datetime.utcnow().timestamp()
     msg["msg_id"]    = msg.get("msg_id") or str(uuid.uuid4())
 
-    result = await db.sessions.update_one(
-        {"_id": session_id},
-        {
-            "$push":  {"messages": msg},
-            "$set":   {"updated_at": datetime.utcnow()},
-        }
-    )
+    try:
+        result = await db.sessions.update_one(
+            {"_id": session_id},
+            {
+                "$push": {"messages": msg},
+                "$set":  {"updated_at": datetime.utcnow()},
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add message: {e}")
+
     if result.modified_count == 0:
-        raise HTTPException(500, "Failed to add message")
+        raise HTTPException(status_code=500, detail="Failed to add message — no document modified")
 
     return {"ok": True, "msg_id": msg["msg_id"]}
 
 
 @collab_router.patch("/sessions/{session_id}/messages/{msg_id}")
 async def update_message_in_session(session_id: str, msg_id: str, req: Request):
-    """Stream-update an AI message (append chunks to content)."""
+    """Update an AI message content (used during streaming)."""
     db = get_db()
-    body = await req.json()
-    content = body.get("content", "")
 
-    result = await db.sessions.update_one(
-        {"_id": session_id, "messages.msg_id": msg_id},
-        {
-            "$set": {
-                "messages.$.content": content,
-                "updated_at": datetime.utcnow(),
-            }
-        }
-    )
+    try:
+        body    = await req.json()
+        content = body.get("content", "")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    try:
+        result = await db.sessions.update_one(
+            {"_id": session_id, "messages.msg_id": msg_id},
+            {
+                "$set": {
+                    "messages.$.content": content,
+                    "updated_at":         datetime.utcnow(),
+                }
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
     if result.matched_count == 0:
-        raise HTTPException(404, "Message not found")
+        raise HTTPException(status_code=404, detail="Message not found")
 
     return {"ok": True}
 
@@ -162,34 +209,53 @@ async def update_message_in_session(session_id: str, msg_id: str, req: Request):
 async def poll_session(session_id: str, since: Optional[float] = None):
     """
     Long-poll endpoint — returns new messages since `since` (unix timestamp).
-    Waits up to 20s for new content, then returns empty if nothing.
+    Waits up to 20 s for new content, then returns empty if nothing arrives.
     """
     db = get_db()
-    deadline = asyncio.get_event_loop().time() + 20  # 20-second long-poll
+    loop     = asyncio.get_event_loop()
+    deadline = loop.time() + 20
 
     while True:
-        doc = await db.sessions.find_one({"_id": session_id})
+        try:
+            doc = await db.sessions.find_one({"_id": session_id})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
         if not doc:
-            raise HTTPException(404, "Session not found")
+            raise HTTPException(status_code=404, detail="Session not found")
 
         messages = doc.get("messages", [])
-        if since is not None:
-            new_msgs = [m for m in messages if m.get("timestamp", 0) > since]
-        else:
-            new_msgs = messages
+        new_msgs = (
+            [m for m in messages if m.get("timestamp", 0) > since]
+            if since is not None
+            else messages
+        )
+
+        # Sanitise any datetime values inside messages
+        for msg in new_msgs:
+            for k, v in msg.items():
+                if isinstance(v, datetime):
+                    msg[k] = v.isoformat()
+
+        updated_at = doc.get("updated_at")
+        updated_ts = (
+            updated_at.timestamp() if isinstance(updated_at, datetime)
+            else (updated_at or 0)
+        )
 
         if new_msgs:
             return {
                 "messages":   new_msgs,
-                "updated_at": doc.get("updated_at", datetime.utcnow()).timestamp()
-                              if isinstance(doc.get("updated_at"), datetime)
-                              else doc.get("updated_at"),
-                "title": doc.get("title", "Collaborative Session"),
+                "updated_at": updated_ts,
+                "title":      doc.get("title", "Collaborative Session"),
             }
 
-        # Nothing yet — wait a bit before re-querying
-        if asyncio.get_event_loop().time() >= deadline:
-            return {"messages": [], "updated_at": since or 0, "title": doc.get("title", "")}
+        if loop.time() >= deadline:
+            return {
+                "messages":   [],
+                "updated_at": since or 0,
+                "title":      doc.get("title", ""),
+            }
 
         await asyncio.sleep(1.5)
 
@@ -198,12 +264,18 @@ async def poll_session(session_id: str, since: Optional[float] = None):
 async def update_session_title(session_id: str, req: PatchTitleRequest):
     """Rename a collaborative session."""
     db = get_db()
-    result = await db.sessions.update_one(
-        {"_id": session_id},
-        {"$set": {"title": req.title, "updated_at": datetime.utcnow()}}
-    )
+
+    try:
+        result = await db.sessions.update_one(
+            {"_id": session_id},
+            {"$set": {"title": req.title, "updated_at": datetime.utcnow()}},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
     if result.matched_count == 0:
-        raise HTTPException(404, "Session not found")
+        raise HTTPException(status_code=404, detail="Session not found")
+
     return {"ok": True}
 
 
@@ -211,16 +283,24 @@ async def update_session_title(session_id: str, req: PatchTitleRequest):
 async def join_session(session_id: str, req: Request):
     """Record a participant joining the session."""
     db = get_db()
-    body = await req.json()
-    name = body.get("name", "Anonymous")
 
-    await db.sessions.update_one(
-        {"_id": session_id},
-        {
-            "$addToSet": {"participants": name},
-            "$set": {"updated_at": datetime.utcnow()},
-        }
-    )
+    try:
+        body = await req.json()
+        name = body.get("name", "Anonymous")
+    except Exception:
+        name = "Anonymous"
+
+    try:
+        await db.sessions.update_one(
+            {"_id": session_id},
+            {
+                "$addToSet": {"participants": name},
+                "$set":      {"updated_at": datetime.utcnow()},
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
     return {"ok": True}
 
 
@@ -228,5 +308,10 @@ async def join_session(session_id: str, req: Request):
 async def delete_collab_session(session_id: str):
     """Delete a collaborative session."""
     db = get_db()
-    await db.sessions.delete_one({"_id": session_id})
+
+    try:
+        await db.sessions.delete_one({"_id": session_id})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
     return {"ok": True}
