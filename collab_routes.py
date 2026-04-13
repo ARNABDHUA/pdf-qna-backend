@@ -3,7 +3,6 @@ collab_routes.py — Collaborative Session API
 """
 
 import os
-import ssl
 import uuid
 import asyncio
 import certifi
@@ -20,33 +19,23 @@ MONGO_URL = os.getenv("MONGODB_URL", "")
 _mongo_client: Optional[AsyncIOMotorClient] = None
 
 
-def _make_tls_context() -> ssl.SSLContext:
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.load_verify_locations(certifi.where())
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    try:
-        ctx.set_ciphers("DEFAULT@SECLEVEL=0")
-    except ssl.SSLError:
-        ctx.set_ciphers("DEFAULT")
-    return ctx
-
-
 def get_db():
     global _mongo_client
     if _mongo_client is None:
         if not MONGO_URL:
             raise RuntimeError("MONGODB_URL environment variable is not set")
-        tls_ctx = _make_tls_context()
+
+        # Build connection URL with TLS params if not already present
+        url = MONGO_URL
+        if "tlsCAFile" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}tlsCAFile={certifi.where()}&tls=true&tlsAllowInvalidCertificates=true"
+
         _mongo_client = AsyncIOMotorClient(
-            MONGO_URL,
+            url,
             serverSelectionTimeoutMS=10000,
             socketTimeoutMS=20000,
             connectTimeoutMS=20000,
-            ssl_context=tls_ctx,
-            retryWrites=True,
-            w="majority",
         )
     return _mongo_client["qna_ai_collab"]
 
