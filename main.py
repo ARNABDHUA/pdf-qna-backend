@@ -286,6 +286,8 @@ from pdf2docx import Converter
 import re
 
 from rag_engine import RAGEngine, CLOUD_MODELS
+from collab_routes import collab_router
+
 
 def format_text_to_story(text, styles):
     story = []
@@ -349,7 +351,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
 rag = RAGEngine()
-
+app.include_router(collab_router)
 
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}

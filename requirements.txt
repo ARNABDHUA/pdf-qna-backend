@@ -10,3 +10,4 @@ python-multipart
 reportlab
 python-docx
 pdf2docx
+motor>=3.3.0
