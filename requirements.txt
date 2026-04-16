@@ -16,4 +16,4 @@ pymongo
 # yt-dlp>=2024.1.0
 # groq>=0.9.0
 # imageio-ffmpeg
-youtube-transcript-api>=0.6.2
+youtube-transcript-api>=1.0.0

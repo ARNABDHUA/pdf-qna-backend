@@ -104,26 +104,43 @@ async def get_video_metadata(video_id: str) -> dict:
     return default
 
 
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable,
+)
+
 def fetch_transcript(video_id: str) -> list[dict]:
     """
-    Fetch transcript segments. Tries English first, then any available language.
+    Fetch transcript segments using the v1.x API (instance-based).
     Returns list of {"start": float, "duration": float, "text": str}.
     """
+    ytt = YouTubeTranscriptApi()
+
     try:
-        # Try English (manual + auto-generated)
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
-        return transcript
+        # Try English first
+        fetched = ytt.fetch(video_id, languages=["en", "en-US", "en-GB"])
+        return [
+            {"start": s.start, "duration": s.duration, "text": s.text}
+            for s in fetched.snippets
+        ]
     except NoTranscriptFound:
         pass
 
-    # Fall back to whatever is available and translate to English if possible
+    # Fall back to any available language, translate to English if possible
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = ytt.list(video_id)
         for t in transcript_list:
             try:
                 if t.is_translatable:
-                    return t.translate("en").fetch()
-                return t.fetch()
+                    fetched = t.translate("en").fetch()
+                else:
+                    fetched = t.fetch()
+                return [
+                    {"start": s.start, "duration": s.duration, "text": s.text}
+                    for s in fetched.snippets
+                ]
             except Exception:
                 continue
     except Exception:
