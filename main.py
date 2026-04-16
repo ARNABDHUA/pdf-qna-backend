@@ -25,6 +25,7 @@ from rag_engine import RAGEngine, CLOUD_MODELS
 from collab_routes import collab_router
 
 from youtube_route import youtube_router
+import subprocess
 
 def format_text_to_story(text, styles):
     story = []
@@ -128,6 +129,19 @@ class FollowUpRequest(BaseModel):
 @app.get("/")
 async def root(): return {"message": "RAG Agent API v3.1 running"}
 
+@app.get("/debug/node")
+async def debug_node():
+    result = subprocess.run(
+        ["which", "node"], capture_output=True, text=True
+    )
+    result2 = subprocess.run(
+        ["find", "/", "-name", "node", "-type", "f"], 
+        capture_output=True, text=True, timeout=10
+    )
+    return {
+        "which_node": result.stdout.strip(),
+        "find_node": result2.stdout.strip(),
+    }
 
 @app.post("/summarize")
 async def summarize_document(req: SummarizeRequest):
