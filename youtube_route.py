@@ -77,7 +77,7 @@ def get_video_metadata(url: str) -> dict:
                 "yt-dlp", "--dump-json", "--no-playlist",
                 "--user-agent", "Mozilla/5.0 ...",
                 "--add-header", "Accept-Language:en-US,en;q=0.9",
-                "--js-runtimes", "nodejs",   # ← add here too
+                "--js-runtimes", "node",   # ← add here too
                 url
             ],
             capture_output=True, text=True, timeout=30
