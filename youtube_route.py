@@ -32,6 +32,10 @@ from reportlab.platypus import (
 )
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
+import imageio_ffmpeg
+
+# Tell yt-dlp where to find ffmpeg
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 youtube_router = APIRouter(tags=["YouTube"])
 
@@ -96,8 +100,9 @@ def download_audio(url: str, output_path: str) -> str:
         "--format", "bestaudio[ext=m4a]/bestaudio/best",
         "--extract-audio",
         "--audio-format", "mp3",
-        "--audio-quality", "5",          # ~130 kbps — good enough for speech
-        "--max-filesize", "50m",          # guard against huge files
+        "--audio-quality", "5",
+        "--max-filesize", "50m",
+        "--ffmpeg-location", FFMPEG_PATH,  # ← add this line
         "--output", output_path,
         "--quiet",
         url,
