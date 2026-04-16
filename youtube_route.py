@@ -73,7 +73,13 @@ def get_video_metadata(url: str) -> dict:
     """Use yt-dlp to fetch video title, channel, duration without downloading."""
     try:
         result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-playlist", url],
+            [
+                "yt-dlp", "--dump-json", "--no-playlist",
+                "--user-agent", "Mozilla/5.0 ...",
+                "--add-header", "Accept-Language:en-US,en;q=0.9",
+                "--js-runtimes", "nodejs",   # ← add here too
+                url
+            ],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
@@ -102,7 +108,12 @@ def download_audio(url: str, output_path: str) -> str:
         "--audio-format", "mp3",
         "--audio-quality", "5",
         "--max-filesize", "50m",
-        "--ffmpeg-location", FFMPEG_PATH,  # ← add this line
+        "--ffmpeg-location", FFMPEG_PATH,
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--add-header", "Accept-Language:en-US,en;q=0.9",
+        "--sleep-interval", "2",
+        "--max-sleep-interval", "5",
+        "--js-runtimes", "nodejs",   # ← add here
         "--output", output_path,
         "--quiet",
         url,
