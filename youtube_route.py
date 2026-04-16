@@ -75,9 +75,9 @@ def get_video_metadata(url: str) -> dict:
         result = subprocess.run(
             [
                 "yt-dlp", "--dump-json", "--no-playlist",
-                "--user-agent", "Mozilla/5.0 ...",
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "--add-header", "Accept-Language:en-US,en;q=0.9",
-                "--js-runtimes", "node",   # ← add here too
+                "--js-runtimes", "node:/usr/bin/node",  # ← updated
                 url
             ],
             capture_output=True, text=True, timeout=30
@@ -113,7 +113,7 @@ def download_audio(url: str, output_path: str) -> str:
         "--add-header", "Accept-Language:en-US,en;q=0.9",
         "--sleep-interval", "2",
         "--max-sleep-interval", "5",
-        "--js-runtimes", "nodejs",   # ← add here
+        "--js-runtimes", "node:/usr/bin/node",  # ← updated
         "--output", output_path,
         "--quiet",
         url,
