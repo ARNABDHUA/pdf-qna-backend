@@ -1,8 +1,8 @@
-
 import io
 import json
 import os
 import tempfile
+import urllib.request
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,9 +23,40 @@ import re
 
 from rag_engine import RAGEngine, CLOUD_MODELS
 from collab_routes import collab_router
-
 from youtube_route import youtube_router
 import subprocess
+
+# ── Tessdata setup (no apt-get needed — pymupdf has Tesseract compiled in) ───
+# We only need the language data file (.traineddata), downloaded once at startup.
+TESSDATA_DIR = os.path.join(os.path.dirname(__file__), "tessdata")
+TESSDATA_ENG = os.path.join(TESSDATA_DIR, "eng.traineddata")
+TESSDATA_URL = (
+    "https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata"
+)
+
+def ensure_tessdata():
+    """Download eng.traineddata on first run if it's not already present."""
+    if os.path.exists(TESSDATA_ENG):
+        return
+    os.makedirs(TESSDATA_DIR, exist_ok=True)
+    print("Downloading eng.traineddata (~4 MB) for OCR support…")
+    try:
+        urllib.request.urlretrieve(TESSDATA_URL, TESSDATA_ENG)
+        print("eng.traineddata downloaded successfully.")
+    except Exception as e:
+        print(f"Warning: Could not download tessdata: {e}")
+        print("OCR endpoint will be unavailable until tessdata is present.")
+
+ensure_tessdata()
+
+# ── Import pymupdf after tessdata is ready ────────────────────────────────────
+try:
+    import pymupdf  # pip install pymupdf
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    print("Warning: pymupdf not installed. Run: pip install pymupdf")
+
 
 def format_text_to_story(text, styles):
     story = []
@@ -135,7 +166,7 @@ async def debug_node():
         ["which", "node"], capture_output=True, text=True
     )
     result2 = subprocess.run(
-        ["find", "/", "-name", "node", "-type", "f"], 
+        ["find", "/", "-name", "node", "-type", "f"],
         capture_output=True, text=True, timeout=10
     )
     return {
@@ -205,7 +236,6 @@ async def delete_document(doc_name: str):
 async def query(req: QueryRequest):
     mode = req.mode if req.mode in VALID_MODES else "chat"
 
-    # Allow querying without docs when web search is on in chat mode
     if not rag.has_documents() and not (req.web_search_enabled and mode == "chat"):
         raise HTTPException(400, "No documents uploaded. Please upload a PDF first.")
 
@@ -225,10 +255,6 @@ async def query(req: QueryRequest):
 
 @app.post("/context")
 async def get_context(req: ContextRequest):
-    """
-    Retrieve relevant chunks from FAISS for Ollama local generation.
-    Supports all four modes: chat, legal, drafting, brief.
-    """
     if not rag.has_documents():
         raise HTTPException(400, "No documents uploaded. Please upload a PDF first.")
 
@@ -258,8 +284,12 @@ async def get_context(req: ContextRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "ollama": await rag.check_ollama(),
-            "documents_loaded": len(rag.get_documents())}
+    return {
+        "status": "healthy",
+        "ollama": await rag.check_ollama(),
+        "documents_loaded": len(rag.get_documents()),
+        "ocr_available": PYMUPDF_AVAILABLE and os.path.exists(TESSDATA_ENG),
+    }
 
 
 @app.post("/convert/text-to-pdf")
@@ -336,6 +366,126 @@ async def pdf_to_word(file: UploadFile = File(...)):
                              headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"})
 
 
+@app.post("/convert/pdf-image-to-pdf")
+async def pdf_image_to_pdf(file: UploadFile = File(...)):
+    """
+    OCR a scanned/image-only PDF and return a searchable PDF.
+
+    Uses PyMuPDF's built-in Tesseract (compiled in — no system tesseract needed).
+    Only requires: pip install pymupdf
+    And the tessdata/eng.traineddata language file (auto-downloaded at startup).
+    """
+    if not PYMUPDF_AVAILABLE:
+        raise HTTPException(
+            500,
+            detail="pymupdf is not installed. Run: pip install pymupdf"
+        )
+
+    if not os.path.exists(TESSDATA_ENG):
+        raise HTTPException(
+            503,
+            detail=(
+                "Tesseract language data not found. "
+                "The server will download it automatically on the next restart, "
+                "or place eng.traineddata in the tessdata/ folder manually."
+            )
+        )
+
+    try:
+        content = await file.read()
+
+        # Open the uploaded PDF with pymupdf
+        src_doc = pymupdf.open(stream=content, filetype="pdf")
+
+        all_text_pages = []
+
+        for page_index, page in enumerate(src_doc):
+            # First try native text extraction (fast, no OCR needed for text PDFs)
+            native_text = page.get_text().strip()
+
+            if native_text and len(native_text) > 20:
+                # Page already has embedded text — use it directly
+                all_text_pages.append(f"[Page {page_index + 1}]\n{native_text}")
+            else:
+                # Image-only page — run OCR via pymupdf's built-in Tesseract
+                # tessdata dir must be set so MuPDF finds the language pack
+                tp = page.get_textpage_ocr(
+                    dpi=300,
+                    full=True,
+                    tessdata=TESSDATA_DIR,
+                    language="eng",
+                )
+                ocr_text = page.get_text(textpage=tp).strip()
+                all_text_pages.append(f"[Page {page_index + 1}]\n{ocr_text}")
+
+        src_doc.close()
+
+        # Build a clean PDF from all extracted text using reportlab
+        full_text = "\n\n".join(all_text_pages)
+
+        buffer = io.BytesIO()
+        pdf_doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=36,
+        )
+
+        styles = getSampleStyleSheet()
+        if 'OCRBody' not in styles:
+            styles.add(ParagraphStyle(
+                name='OCRBody',
+                parent=styles['Normal'],
+                fontSize=11,
+                leading=15,
+                spaceAfter=4,
+                alignment=TA_LEFT,
+            ))
+        if 'OCRPageHeader' not in styles:
+            styles.add(ParagraphStyle(
+                name='OCRPageHeader',
+                parent=styles['Heading3'],
+                fontSize=10,
+                leading=14,
+                spaceBefore=14,
+                spaceAfter=6,
+                textColor=colors.HexColor('#888888'),
+            ))
+
+        story = []
+        for line in full_text.split('\n'):
+            clean = line.strip()
+            if not clean:
+                story.append(Spacer(1, 6))
+                continue
+            # Page header lines like "[Page 1]"
+            if re.match(r'^\[Page \d+\]$', clean):
+                story.append(Paragraph(clean, styles['OCRPageHeader']))
+                continue
+            # Escape XML special characters for reportlab
+            safe = clean.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            story.append(Paragraph(safe, styles['OCRBody']))
+
+        if not story:
+            story.append(Paragraph("No text could be extracted from this PDF.", styles['OCRBody']))
+
+        pdf_doc.build(story)
+        buffer.seek(0)
+
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=searchable_ocr.pdf"},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, detail=f"OCR Error: {str(e)}")
+
+
 @app.post("/followups")
 async def get_followups(req: FollowUpRequest):
     system = (
@@ -372,5 +522,3 @@ if __name__ == "__main__":
     print("🚀 Starting server...")
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-
