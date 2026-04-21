@@ -26,6 +26,9 @@ from collab_routes import collab_router
 from youtube_route import youtube_router
 import subprocess
 
+from expense_mongo_routes import expense_mongo_router
+
+
 # ── Tessdata setup (no apt-get needed — pymupdf has Tesseract compiled in) ───
 # We only need the language data file (.traineddata), downloaded once at startup.
 TESSDATA_DIR = os.path.join(os.path.dirname(__file__), "tessdata")
@@ -122,6 +125,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
 rag = RAGEngine()
 app.include_router(collab_router)
 app.include_router(youtube_router)
+app.include_router(expense_mongo_router)
 
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
