@@ -28,6 +28,9 @@ import subprocess
 
 from expense_mongo_routes import expense_mongo_router
 
+from group_splits_routes import group_splits_router, group_ws_router
+
+
 
 # ── Tessdata setup (no apt-get needed — pymupdf has Tesseract compiled in) ───
 # We only need the language data file (.traineddata), downloaded once at startup.
@@ -126,6 +129,9 @@ rag = RAGEngine()
 app.include_router(collab_router)
 app.include_router(youtube_router)
 app.include_router(expense_mongo_router)
+
+app.include_router(group_splits_router)
+app.include_router(group_ws_router)
 
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
