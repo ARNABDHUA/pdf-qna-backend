@@ -122,8 +122,14 @@ def format_text_to_story(text, styles):
 
 
 app = FastAPI(title="RAG Agent API", version="3.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                   allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 rag = RAGEngine()
 app.include_router(collab_router)

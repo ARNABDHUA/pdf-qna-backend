@@ -597,10 +597,9 @@ async def delete_group(group_id: str, req: AuthBase):
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
 @group_ws_router.websocket("/ws/{group_id}/{username}")
 async def group_websocket(ws: WebSocket, group_id: str, username: str):
-    await manager.connect(group_id, username.strip().lower(), ws)
     try:
+        await manager.connect(group_id, username.strip().lower(), ws)
         while True:
-            # Keep alive — client can send pings
             data = await ws.receive_text()
             try:
                 msg = json.loads(data)
@@ -610,3 +609,9 @@ async def group_websocket(ws: WebSocket, group_id: str, username: str):
                 pass
     except WebSocketDisconnect:
         manager.disconnect(group_id, ws)
+    except Exception as e:
+        # Handle unexpected errors gracefully
+        try:
+            manager.disconnect(group_id, ws)
+        except Exception:
+            pass
