@@ -135,7 +135,14 @@ async def send_push_to_members(
         return
 
     subs_cursor = db.push_subscriptions.find({"username": {"$in": members}})
-    subs = [s async for s in subs_cursor]
+    all_subs = [s async for s in subs_cursor]
+    # Deduplicate: keep latest subscription per username
+    seen = {}
+    for s in all_subs:
+        u = s.get("username")
+        if u not in seen or s.get("updated_at", "") > seen[u].get("updated_at", ""):
+            seen[u] = s
+    subs = list(seen.values())
 
     if not subs:
         print(f"[Push] No push subscriptions found for members: {members}")
