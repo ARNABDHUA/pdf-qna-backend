@@ -537,4 +537,11 @@ async def get_followups(req: FollowUpRequest):
 if __name__ == "__main__":
     print("🚀 Starting server...")
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        ws="websockets",        # ← explicit WS handler
+        ws_ping_interval=20,    # ← keep alive
+        ws_ping_timeout=30,     # ← timeout
+    )

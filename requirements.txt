@@ -18,3 +18,4 @@ pymongo
 # imageio-ffmpeg
 youtube-transcript-api>=1.0.0
 pymupdf
+websockets>=11.0
