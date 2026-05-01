@@ -1,26 +1,10 @@
 """
 group_splits_routes.py — Group-based split expenses for ExpenseTracker
-Features:
-  - Create groups, invite via link, join via token
-  - Add members by username, remove members (admin only)
-  - Add group expenses (split equally by default, editable shares)
-  - Month/year wise breakdown with category filter
-  - You-owe / others-owe tracking
-  - WebSocket for real-time updates
-  - Web Push notifications (works outside browser/Chrome)
-
-Add to main.py:
-    from group_splits_routes import group_splits_router, group_ws_router
-    app.include_router(group_splits_router)
-    app.include_router(group_ws_router)
-
-Requirements:
-    pip install pywebpush
-
-Env vars needed:
-    VAPID_PUBLIC_KEY   = BEl62iU...   (base64url string from vapidkeys.com)
-    VAPID_PRIVATE_KEY  = HkA9a3_...  (base64url string from vapidkeys.com)
-    VAPID_MAILTO       = mailto:you@yourdomain.com
+FIXES APPLIED:
+  1. hash_pw now matches expense_mongo_routes.py exactly (same hmac.new usage)
+  2. pywebpush webpush() call uses correct keyword args for v2.x
+  3. Added error logging so push failures are visible in Render logs
+  4. send_push_to_members logs why it skips (helps debugging)
 """
 
 import os
@@ -40,7 +24,6 @@ try:
 except ImportError:
     MONGO_AVAILABLE = False
 
-# ── Web Push (pywebpush) ───────────────────────────────────────────────────────
 try:
     from pywebpush import webpush, WebPushException
     WEBPUSH_AVAILABLE = True
@@ -49,6 +32,7 @@ except ImportError:
     print("Warning: pywebpush not installed. Run: pip install pywebpush")
 
 MONGO_URL         = os.getenv("MONGODB_URL", "")
+# ── FIX: use same secret as expense_mongo_routes.py ───────────────────────────
 SECRET            = os.getenv("EXPENSE_SECRET", "expense_tracker_secret_2025")
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY  = os.getenv("VAPID_PUBLIC_KEY", "")
@@ -70,7 +54,9 @@ def get_db():
     return _db
 
 
+# ── FIX: hash_pw must exactly match expense_mongo_routes.py ───────────────────
 def hash_pw(pw: str) -> str:
+    """SHA-256 HMAC — identical to expense_mongo_routes.hash_password()"""
     return hmac.new(SECRET.encode(), pw.encode(), hashlib.sha256).hexdigest()
 
 
@@ -81,7 +67,6 @@ def verify_pw(pw: str, hashed: str) -> bool:
 # ── WebSocket connection manager ───────────────────────────────────────────────
 class GroupConnectionManager:
     def __init__(self):
-        # group_id -> list of (username, websocket)
         self.active: Dict[str, List[tuple]] = {}
 
     async def connect(self, group_id: str, username: str, ws: WebSocket):
@@ -125,43 +110,62 @@ async def send_push_to_members(
 ):
     """
     Send a Web Push notification to every group member except the sender.
-    Silently skips if VAPID keys are not configured or pywebpush not installed.
-    Cleans up expired (410) subscriptions automatically.
+
+    FIX: Added detailed logging so you can see in Render logs why pushes
+    are skipped or failing.
     """
-    if not WEBPUSH_AVAILABLE or not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
+    if not WEBPUSH_AVAILABLE:
+        print("[Push] Skipped: pywebpush not installed")
+        return
+    if not VAPID_PRIVATE_KEY:
+        print("[Push] Skipped: VAPID_PRIVATE_KEY env var is empty")
+        return
+    if not VAPID_PUBLIC_KEY:
+        print("[Push] Skipped: VAPID_PUBLIC_KEY env var is empty")
         return
 
     group = await db.groups.find_one({"group_id": group_id})
     if not group:
+        print(f"[Push] Skipped: group {group_id} not found")
         return
 
     members = [m for m in group.get("members", []) if m != exclude_username]
     if not members:
+        print(f"[Push] No other members in group {group_id}")
         return
 
     subs_cursor = db.push_subscriptions.find({"username": {"$in": members}})
     subs = [s async for s in subs_cursor]
 
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    if not subs:
+        print(f"[Push] No push subscriptions found for members: {members}")
+        return
+
+    print(f"[Push] Sending to {len(subs)} subscription(s) in group {group_id}")
+    data = json.dumps(payload, ensure_ascii=False)
     expired_ids = []
 
     for sub_doc in subs:
         try:
+            # ── FIX: pywebpush 2.x API ────────────────────────────────────────
             webpush(
                 subscription_info=sub_doc["subscription"],
                 data=data,
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims={"sub": VAPID_MAILTO},
             )
+            print(f"[Push] ✓ Sent to {sub_doc.get('username')}")
         except WebPushException as e:
-            # 410 Gone = subscription no longer valid, remove it
+            status = e.response.status_code if e.response is not None else "?"
+            print(f"[Push] WebPushException for {sub_doc.get('username')}: status={status} — {e}")
             if e.response is not None and e.response.status_code == 410:
                 expired_ids.append(sub_doc["_id"])
         except Exception as e:
-            print(f"Push error for {sub_doc.get('username')}: {e}")
+            print(f"[Push] Unexpected error for {sub_doc.get('username')}: {e}")
 
     if expired_ids:
         await db.push_subscriptions.delete_many({"_id": {"$in": expired_ids}})
+        print(f"[Push] Removed {len(expired_ids)} expired subscription(s)")
 
 
 # ── Pydantic Models ────────────────────────────────────────────────────────────
@@ -203,7 +207,7 @@ class AddGroupExpenseRequest(AuthBase):
     description: str
     reason: Optional[str] = ""
     timestamp: Optional[int] = None
-    splits: Optional[List[SplitShare]] = None   # None = equal split
+    splits: Optional[List[SplitShare]] = None
     account_id: Optional[str] = None
     account_name: Optional[str] = None
 
@@ -221,7 +225,7 @@ class DeleteExpenseRequest(AuthBase):
 
 
 class PushSubscribeRequest(AuthBase):
-    subscription: dict   # { endpoint, keys: { p256dh, auth } }
+    subscription: dict
 
 
 class PushUnsubscribeRequest(AuthBase):
@@ -268,7 +272,6 @@ group_ws_router     = APIRouter(prefix="/groups", tags=["groups-ws"])
 # ── Push subscription endpoints ────────────────────────────────────────────────
 @group_splits_router.post("/push-subscribe")
 async def push_subscribe(req: PushSubscribeRequest):
-    """Store a browser push subscription for this user."""
     db = get_db()
     _, uname = await auth_user(db, req.username, req.password)
 
@@ -288,15 +291,14 @@ async def push_subscribe(req: PushSubscribeRequest):
         },
         upsert=True,
     )
+    print(f"[Push] Subscription saved for {uname}")
     return {"success": True, "message": "Push subscription saved."}
 
 
 @group_splits_router.post("/push-unsubscribe")
 async def push_unsubscribe(req: PushUnsubscribeRequest):
-    """Remove a push subscription (called when user disables notifications)."""
     db = get_db()
     _, uname = await auth_user(db, req.username, req.password)
-
     await db.push_subscriptions.delete_many(
         {"username": uname, "endpoint": req.endpoint}
     )
@@ -305,7 +307,6 @@ async def push_unsubscribe(req: PushUnsubscribeRequest):
 
 @group_splits_router.get("/vapid-public-key")
 async def get_vapid_public_key():
-    """Return the VAPID public key so the frontend can subscribe."""
     if not VAPID_PUBLIC_KEY:
         raise HTTPException(503, "Push notifications not configured on this server.")
     return {"vapid_public_key": VAPID_PUBLIC_KEY}
@@ -375,7 +376,6 @@ async def join_group(req: JoinGroupRequest):
         "group_id": group["group_id"],
     })
 
-    # Push to existing members
     await send_push_to_members(db, group["group_id"], uname, {
         "title":   f"👋 {uname} joined {group['name']}",
         "body":    f"{uname} is now a member of the group.",
@@ -548,7 +548,6 @@ async def add_group_expense(req: AddGroupExpenseRequest):
     members = group["members"]
     n       = len(members)
 
-    # Build splits
     if req.splits:
         total_shares = sum(s.share for s in req.splits)
         if abs(total_shares - req.amount) > 0.01:
@@ -561,7 +560,6 @@ async def add_group_expense(req: AddGroupExpenseRequest):
             for s in req.splits
         ]
     else:
-        # Equal split — payer's share is auto-settled
         per_person = round(req.amount / n, 2)
         splits     = []
         running    = 0
@@ -605,7 +603,6 @@ async def add_group_expense(req: AddGroupExpenseRequest):
 
     broadcast_doc = {k: v for k, v in expense_doc.items() if k != "_id"}
 
-    # WebSocket broadcast (real-time for open tabs)
     await manager.broadcast(req.group_id, {
         "type":       "new_expense",
         "expense":    broadcast_doc,
@@ -613,7 +610,6 @@ async def add_group_expense(req: AddGroupExpenseRequest):
         "group_name": group["name"],
     })
 
-    # Web Push (for closed tabs / background)
     per_person_str = fmt_inr(req.amount / n) if n > 0 else fmt_inr(req.amount)
     await send_push_to_members(db, req.group_id, uname, {
         "title":   f"💸 New expense in {group['name']}",
@@ -673,7 +669,6 @@ async def settle_share(req: SettleRequest):
         "group_id":    req.group_id,
     })
 
-    # Push to the person whose share was settled
     await send_push_to_members(db, req.group_id, uname, {
         "title":   f"✅ Share settled in {group['name']}",
         "body":    f"{uname} marked {fmt_inr(req.amount)} as paid for {req.settled_for_username}",
