@@ -767,6 +767,32 @@ async def regen_invite(group_id: str, req: AuthBase):
     }
 
 
+# # ── Leave group ────────────────────────────────────────────────────────────────
+# @group_splits_router.post("/{group_id}/leave")
+# async def leave_group(group_id: str, req: AuthBase):
+#     db = get_db()
+#     _, uname = await auth_user(db, req.username, req.password)
+
+#     group = await get_group_or_raise(db, group_id)
+#     if uname not in group["members"]:
+#         raise HTTPException(400, "You are not a member of this group.")
+#     if group["admin"] == uname:
+#         raise HTTPException(
+#             400, "Admin cannot leave. Transfer admin or delete the group."
+#         )
+
+#     await db.groups.update_one(
+#         {"group_id": group_id}, {"$pull": {"members": uname}}
+#     )
+#     await manager.broadcast(group_id, {
+#         "type":     "member_left",
+#         "username": uname,
+#         "group_id": group_id,
+#     })
+
+#     return {"success": True, "message": f"Left group '{group['name']}'."}
+
+
 # ── Leave group ────────────────────────────────────────────────────────────────
 @group_splits_router.post("/{group_id}/leave")
 async def leave_group(group_id: str, req: AuthBase):
@@ -776,21 +802,43 @@ async def leave_group(group_id: str, req: AuthBase):
     group = await get_group_or_raise(db, group_id)
     if uname not in group["members"]:
         raise HTTPException(400, "You are not a member of this group.")
-    if group["admin"] == uname:
-        raise HTTPException(
-            400, "Admin cannot leave. Transfer admin or delete the group."
-        )
 
-    await db.groups.update_one(
-        {"group_id": group_id}, {"$pull": {"members": uname}}
-    )
+    remaining = [m for m in group["members"] if m != uname]
+
+    # If admin is leaving, auto-transfer admin to next member (or delete if last)
+    update_fields = {"$pull": {"members": uname}}
+    if group["admin"] == uname:
+        if len(remaining) == 0:
+            # Admin is last member — delete the group entirely
+            await db.groups.delete_one({"group_id": group_id})
+            await db.group_expenses.delete_many({"group_id": group_id})
+            await manager.broadcast(group_id, {
+                "type": "group_deleted",
+                "group_id": group_id,
+            })
+            return {
+                "success": True,
+                "message": f"Group '{group['name']}' deleted (you were the last member).",
+            }
+        else:
+            # Transfer admin to the next member in the list
+            new_admin = remaining[0]
+            update_fields["$set"] = {"admin": new_admin}
+
+    await db.groups.update_one({"group_id": group_id}, update_fields)
+
     await manager.broadcast(group_id, {
-        "type":     "member_left",
+        "type": "member_left",
         "username": uname,
         "group_id": group_id,
+        "new_admin": update_fields.get("$set", {}).get("admin"),
     })
 
-    return {"success": True, "message": f"Left group '{group['name']}'."}
+    return {
+        "success": True,
+        "message": f"Left group '{group['name']}'.",
+        "new_admin": update_fields.get("$set", {}).get("admin"),
+    }
 
 
 # ── Delete group (admin only) ──────────────────────────────────────────────────
