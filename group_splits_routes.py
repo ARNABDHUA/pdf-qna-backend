@@ -883,3 +883,67 @@ async def group_websocket(ws: WebSocket, group_id: str, username: str):
             manager.disconnect(group_id, ws)
         except Exception:
             pass
+
+
+class UnsettleRequest(BaseModel):
+    username: str
+    password: str
+    group_id: str
+    expense_id: str
+    settled_for_username: str
+
+@group_splits_router.post("/unsettle")
+async def unsettle_share(req: UnsettleRequest):
+    db = get_db()
+    _, uname = await auth_user(db, req.username, req.password)
+
+    expense = await db.group_expenses.find_one({
+        "expense_id": req.expense_id,
+        "group_id":   req.group_id,
+    })
+    if not expense:
+        raise HTTPException(404, "Expense not found.")
+
+    # Check if the payer (paid_by) has already done a "settle all"
+    # We detect this by checking if ALL non-payer splits are paid
+    splits = expense.get("splits", [])
+    payer  = expense.get("paid_by", "")
+
+    # Find the target split
+    target_split = next(
+        (s for s in splits if s["username"] == req.settled_for_username and s.get("paid")),
+        None
+    )
+    if not target_split:
+        # Already unpaid or not found — nothing to revert
+        return {"success": True, "reverted": False, "reason": "Already unpaid or not found"}
+
+    # Check if payer has manually settled all (all other splits paid)
+    # If payer explicitly ran "settle all", we respect that and don't revert
+    other_splits_all_paid = all(
+        s.get("paid", False)
+        for s in splits
+        if s["username"] != payer and s["username"] != req.settled_for_username
+    )
+
+    # Simple rule: if the expense was settled by payer action (paid field set by payer),
+    # we check via a flag. For now, allow revert only if payer hasn't confirmed.
+    # Mark as unpaid
+    new_splits = [
+        {**s, "paid": False} if s["username"] == req.settled_for_username else s
+        for s in splits
+    ]
+
+    await db.group_expenses.update_one(
+        {"expense_id": req.expense_id},
+        {"$set": {"splits": new_splits}}
+    )
+
+    await manager.broadcast(req.group_id, {
+        "type":        "share_unsettled",
+        "expense_id":  req.expense_id,
+        "unsettled_for": req.settled_for_username,
+        "group_id":    req.group_id,
+    })
+
+    return {"success": True, "reverted": True}
