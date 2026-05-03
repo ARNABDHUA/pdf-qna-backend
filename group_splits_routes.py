@@ -869,8 +869,7 @@ async def delete_group(group_id: str, req: AuthBase):
 class CheckPaidStatusRequest(BaseModel):
     username: str
     password: str
-    group_id: str
-    debtor_username: str
+    debtor_username: str  
 
 
 class PayMySharesRequest(BaseModel):
