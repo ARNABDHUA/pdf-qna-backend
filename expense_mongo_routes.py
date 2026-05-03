@@ -329,15 +329,66 @@ async def save_expenses(req: SaveRequest):
     }
 
 
+# @expense_mongo_router.post("/sync")
+# async def sync_expenses(req: SyncRequest):
+#     """Login and return all cloud expenses + budget for this user."""
+#     db = get_db()
+#     uname = req.username.strip().lower()
+
+#     user = await db.users.find_one({"username": uname})
+#     if user is None:
+#         raise HTTPException(404, "Username not found. Please save data first to register.")
+#     if not verify_password(req.password, user["password_hash"]):
+#         raise HTTPException(401, "Incorrect password.")
+
+#     # ── Fetch expenses ──
+#     cursor = db.expenses.find({"username": uname}, {"_id": 0, "username": 0})
+#     expenses = [e async for e in cursor]
+
+#     # ── Fetch budget ──
+#     budget_doc = await db.budgets.find_one({"username": uname}, {"_id": 0, "username": 0})
+#     budget = budget_doc.get("budget") if budget_doc else None
+
+#     return {
+#         "success": True,
+#         "expenses": expenses,
+#         "count": len(expenses),
+#         "budget": budget,        # ← NEW: returned to frontend
+#         "has_budget": budget is not None,
+#     }
+
+
 @expense_mongo_router.post("/sync")
 async def sync_expenses(req: SyncRequest):
-    """Login and return all cloud expenses + budget for this user."""
+    """Login and return all cloud expenses + budget. Auto-registers if user not found."""
     db = get_db()
     uname = req.username.strip().lower()
 
+    if not uname or len(uname) < 2:
+        raise HTTPException(400, "Username must be at least 2 characters.")
+    if not req.password or len(req.password) < 4:
+        raise HTTPException(400, "Password must be at least 4 characters.")
+
     user = await db.users.find_one({"username": uname})
+
     if user is None:
-        raise HTTPException(404, "Username not found. Please save data first to register.")
+        # ── Auto-register new user ──
+        await db.users.insert_one({
+            "username": uname,
+            "password_hash": hash_password(req.password),
+            "created_at": datetime.utcnow(),
+        })
+        return {
+            "success": True,
+            "expenses": [],
+            "count": 0,
+            "budget": None,
+            "has_budget": False,
+            "registered": True,
+            "message": f"New account created for '{uname}'. No expenses yet.",
+        }
+
+    # ── Existing user — verify password ──
     if not verify_password(req.password, user["password_hash"]):
         raise HTTPException(401, "Incorrect password.")
 
@@ -353,6 +404,8 @@ async def sync_expenses(req: SyncRequest):
         "success": True,
         "expenses": expenses,
         "count": len(expenses),
-        "budget": budget,        # ← NEW: returned to frontend
+        "budget": budget,
         "has_budget": budget is not None,
+        "registered": False,
+        "message": f"Synced {len(expenses)} expenses.",
     }
