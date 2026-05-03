@@ -862,6 +862,128 @@ async def delete_group(group_id: str, req: AuthBase):
     return {"success": True, "message": "Group deleted."}
 
 
+# ── ADD THESE TWO ENDPOINTS to group_splits_routes.py ────────────────────────
+# Paste them just before the WebSocket endpoint section
+
+
+class CheckPaidStatusRequest(BaseModel):
+    username: str
+    password: str
+    group_id: str
+    debtor_username: str
+
+
+class PayMySharesRequest(BaseModel):
+    username: str
+    password: str
+
+
+@group_splits_router.post("/{group_id}/check-paid-status")
+async def check_paid_status(group_id: str, req: CheckPaidStatusRequest):
+    """
+    Creditor calls this before showing Settle All.
+    Returns whether the debtor has acknowledged/paid their shares
+    (i.e. all their splits are marked paid=True by themselves).
+    """
+    db = get_db()
+    _, uname = await auth_user(db, req.username, req.password)
+
+    group = await get_group_or_raise(db, group_id)
+    if uname not in group["members"]:
+        raise HTTPException(403, "Not a group member.")
+
+    debtor = req.debtor_username.strip().lower()
+
+    exp_cursor = db.group_expenses.find({"group_id": group_id}, {"_id": 0})
+    expenses = [e async for e in exp_cursor]
+
+    unpaid_shares = []
+    for e in expenses:
+        if e.get("paid_by") == uname:          # only expenses THIS user paid for
+            for s in e.get("splits", []):
+                if s["username"] == debtor and not s.get("paid", False):
+                    unpaid_shares.append({
+                        "expense_id": e["expense_id"],
+                        "amount": s["share"],
+                    })
+
+    total_unpaid = sum(s["amount"] for s in unpaid_shares)
+    return {
+        "success": True,
+        "fully_paid": len(unpaid_shares) == 0,
+        "unpaid_count": len(unpaid_shares),
+        "total_unpaid": round(total_unpaid, 2),
+    }
+
+
+@group_splits_router.post("/{group_id}/pay-my-shares")
+async def pay_my_shares(group_id: str, req: PayMySharesRequest):
+    """
+    Debtor calls this to mark all their own unpaid splits as paid.
+    Returns total amount paid and count of expenses settled.
+    Broadcasts a WebSocket event so creditors are notified.
+    """
+    db = get_db()
+    _, uname = await auth_user(db, req.username, req.password)
+
+    group = await get_group_or_raise(db, group_id)
+    if uname not in group["members"]:
+        raise HTTPException(403, "Not a group member.")
+
+    exp_cursor = db.group_expenses.find({"group_id": group_id}, {"_id": 0})
+    expenses = [e async for e in exp_cursor]
+
+    total_paid = 0.0
+    settled_count = 0
+
+    for e in expenses:
+        if e.get("paid_by") == uname:
+            continue                           # skip expenses you paid for yourself
+
+        new_splits = []
+        changed = False
+        for s in e.get("splits", []):
+            if s["username"] == uname and not s.get("paid", False):
+                new_splits.append({**s, "paid": True})
+                total_paid += s["share"]
+                changed = True
+            else:
+                new_splits.append(s)
+
+        if changed:
+            await db.group_expenses.update_one(
+                {"expense_id": e["expense_id"]},
+                {"$set": {"splits": new_splits}},
+            )
+            settled_count += 1
+
+    total_paid = round(total_paid, 2)
+
+    # Broadcast so creditors see the update in real time
+    await manager.broadcast(group_id, {
+        "type": "shares_self_paid",
+        "by": uname,
+        "total": total_paid,
+        "settled_count": settled_count,
+        "group_id": group_id,
+    })
+
+    # Push notification to creditors
+    await send_push_to_members(db, group_id, uname, {
+        "title": f"💳 {uname} paid their dues in {group['name']}",
+        "body": f"{uname} marked {fmt_inr(total_paid)} as paid — you can now settle!",
+        "groupId": group_id,
+        "url": "/expenses",
+    })
+
+    return {
+        "success": True,
+        "total_paid": total_paid,
+        "settled_count": settled_count,
+        "message": f"Marked {settled_count} expense share(s) as paid (total {fmt_inr(total_paid)}).",
+    }
+
+
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
 @group_ws_router.websocket("/ws/{group_id}/{username}")
 async def group_websocket(ws: WebSocket, group_id: str, username: str):
