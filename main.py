@@ -30,6 +30,9 @@ from expense_mongo_routes import expense_mongo_router
 
 from group_splits_routes import group_splits_router, group_ws_router
 
+from community_routes import community_router
+
+
 
 
 # ── Tessdata setup (no apt-get needed — pymupdf has Tesseract compiled in) ───
@@ -138,7 +141,7 @@ app.include_router(expense_mongo_router)
 
 app.include_router(group_splits_router)
 app.include_router(group_ws_router)
-
+app.include_router(community_router)
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
 
