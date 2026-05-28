@@ -436,3 +436,5 @@ async def month_stats(month_key: str):
         "max_expense":       round(stats.get("max", 0), 2),
         "total_community":   round(stats.get("sum", 0), 2),
     }
+
+# added by arnab
