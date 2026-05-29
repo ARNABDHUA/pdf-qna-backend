@@ -1,9 +1,13 @@
+import asyncio
 import io
 import json
 import os
 import tempfile
 import urllib.request
 import uvicorn
+import httpx
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -27,16 +31,11 @@ from youtube_route import youtube_router
 import subprocess
 
 from expense_mongo_routes import expense_mongo_router
-
 from group_splits_routes import group_splits_router, group_ws_router
-
 from community_routes import community_router
 
 
-
-
-# ── Tessdata setup (no apt-get needed — pymupdf has Tesseract compiled in) ───
-# We only need the language data file (.traineddata), downloaded once at startup.
+# ── Tessdata setup (no apt-get needed — pymupdf has Tesseract compiled in) ────
 TESSDATA_DIR = os.path.join(os.path.dirname(__file__), "tessdata")
 TESSDATA_ENG = os.path.join(TESSDATA_DIR, "eng.traineddata")
 TESSDATA_URL = (
@@ -60,12 +59,46 @@ ensure_tessdata()
 
 # ── Import pymupdf after tessdata is ready ────────────────────────────────────
 try:
-    import pymupdf  # pip install pymupdf
+    import pymupdf
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
     print("Warning: pymupdf not installed. Run: pip install pymupdf")
 
+
+# ── Keep-alive: self-ping every 5 minutes to prevent Render sleep ─────────────
+SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
+PING_INTERVAL = 300  # 5 minutes in seconds
+
+async def keep_alive_ping():
+    """Pings /health every 5 minutes so Render never idles the server."""
+    await asyncio.sleep(30)  # wait for server to fully boot before first ping
+    async with httpx.AsyncClient(timeout=10) as client:
+        while True:
+            try:
+                resp = await client.get(f"{SELF_URL}/health")
+                print(f"[keep-alive] ping → {resp.status_code}")
+            except Exception as e:
+                print(f"[keep-alive] ping failed: {e}")
+            await asyncio.sleep(PING_INTERVAL)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── startup ──
+    task = asyncio.create_task(keep_alive_ping())
+    print(f"[keep-alive] Background ping started → {SELF_URL}/health every {PING_INTERVAL // 60} minutes")
+    yield
+    # ── shutdown ──
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    print("[keep-alive] Server shutting down, ping task cancelled.")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def format_text_to_story(text, styles):
     story = []
@@ -84,14 +117,18 @@ def format_text_to_story(text, styles):
 
     for line in lines:
         clean_line = line.strip()
-        if not clean_line: continue
+        if not clean_line:
+            continue
 
         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
 
         if clean_line in ["EXPERIENCE", "PROJECT", "EDUCATION", "SKILLS", "ACHIEVEMENTS"]:
             if in_education_section and edu_data:
                 t = Table(edu_data, colWidths=[300, 150])
-                t.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'), ('FONTSIZE',(0,0),(-1,-1), 9)]))
+                t.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9)
+                ]))
                 story.append(t)
                 edu_data = []
             in_education_section = (clean_line == "EDUCATION")
@@ -101,7 +138,10 @@ def format_text_to_story(text, styles):
         if in_education_section:
             if ',' in clean_line:
                 parts = clean_line.split(',', 1)
-                edu_data.append([Paragraph(parts[0], body_text), Paragraph(parts[1], body_text)])
+                edu_data.append([
+                    Paragraph(parts[0], body_text),
+                    Paragraph(parts[1], body_text)
+                ])
             else:
                 edu_data.append([Paragraph(clean_line, body_text), ""])
             continue
@@ -124,7 +164,10 @@ def format_text_to_story(text, styles):
     return story
 
 
-app = FastAPI(title="RAG Agent API", version="3.1.0")
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="RAG Agent API", version="3.1.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -138,10 +181,10 @@ rag = RAGEngine()
 app.include_router(collab_router)
 app.include_router(youtube_router)
 app.include_router(expense_mongo_router)
-
 app.include_router(group_splits_router)
 app.include_router(group_ws_router)
 app.include_router(community_router)
+
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
 
@@ -177,13 +220,13 @@ class FollowUpRequest(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/")
-async def root(): return {"message": "RAG Agent API v3.1 running"}
+async def root():
+    return {"message": "RAG Agent API v3.1 running"}
+
 
 @app.get("/debug/node")
 async def debug_node():
-    result = subprocess.run(
-        ["which", "node"], capture_output=True, text=True
-    )
+    result = subprocess.run(["which", "node"], capture_output=True, text=True)
     result2 = subprocess.run(
         ["find", "/", "-name", "node", "-type", "f"],
         capture_output=True, text=True, timeout=10
@@ -192,6 +235,7 @@ async def debug_node():
         "which_node": result.stdout.strip(),
         "find_node": result2.stdout.strip(),
     }
+
 
 @app.post("/summarize")
 async def summarize_document(req: SummarizeRequest):
@@ -243,7 +287,8 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 
 @app.get("/documents")
-async def get_documents(): return {"documents": rag.get_documents()}
+async def get_documents():
+    return {"documents": rag.get_documents()}
 
 
 @app.delete("/documents/{doc_name}")
@@ -315,7 +360,8 @@ async def health():
 async def text_to_pdf(text: str = Query(...)):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter,
-                            rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+                            rightMargin=72, leftMargin=72,
+                            topMargin=72, bottomMargin=18)
     styles = getSampleStyleSheet()
     if 'Justify' not in styles:
         styles.add(ParagraphStyle(name='Justify', alignment=TA_LEFT, fontSize=11, leading=14))
@@ -325,9 +371,11 @@ async def text_to_pdf(text: str = Query(...)):
     for line in lines:
         clean_line = line.strip()
         if not clean_line:
-            story.append(Spacer(1, 12)); continue
+            story.append(Spacer(1, 12))
+            continue
         if clean_line.startswith('---'):
-            story.append(Spacer(1, 6)); continue
+            story.append(Spacer(1, 6))
+            continue
         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', clean_line)
         if clean_line.startswith('###'):
             p_text = clean_line.replace('###', '').strip()
@@ -339,8 +387,11 @@ async def text_to_pdf(text: str = Query(...)):
 
     doc.build(story)
     buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/pdf",
-                             headers={"Content-Disposition": "attachment; filename=formatted_legal.pdf"})
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=formatted_legal.pdf"}
+    )
 
 
 @app.post("/convert/word-to-pdf")
@@ -357,8 +408,11 @@ async def word_to_pdf(file: UploadFile = File(...)):
         story  = format_text_to_story(full_text, styles)
         pdf_doc.build(story)
         buffer.seek(0)
-        return StreamingResponse(buffer, media_type="application/pdf",
-                                 headers={"Content-Disposition": "attachment; filename=consistent_output.pdf"})
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=consistent_output.pdf"}
+        )
     except Exception as e:
         raise HTTPException(500, detail=f"Formatting Error: {str(e)}")
 
@@ -380,25 +434,21 @@ async def pdf_to_word(file: UploadFile = File(...)):
     os.remove(tmp_pdf_path)
     os.remove(tmp_docx_path)
 
-    return StreamingResponse(io.BytesIO(docx_content),
-                             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                             headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"})
+    return StreamingResponse(
+        io.BytesIO(docx_content),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": "attachment; filename=pdf_to_word.docx"}
+    )
 
 
 @app.post("/convert/pdf-image-to-pdf")
 async def pdf_image_to_pdf(file: UploadFile = File(...)):
     """
     OCR a scanned/image-only PDF and return a searchable PDF.
-
-    Uses PyMuPDF's built-in Tesseract (compiled in — no system tesseract needed).
-    Only requires: pip install pymupdf
-    And the tessdata/eng.traineddata language file (auto-downloaded at startup).
+    Uses PyMuPDF's built-in Tesseract. Requires: pip install pymupdf
     """
     if not PYMUPDF_AVAILABLE:
-        raise HTTPException(
-            500,
-            detail="pymupdf is not installed. Run: pip install pymupdf"
-        )
+        raise HTTPException(500, detail="pymupdf is not installed. Run: pip install pymupdf")
 
     if not os.path.exists(TESSDATA_ENG):
         raise HTTPException(
@@ -412,22 +462,14 @@ async def pdf_image_to_pdf(file: UploadFile = File(...)):
 
     try:
         content = await file.read()
-
-        # Open the uploaded PDF with pymupdf
         src_doc = pymupdf.open(stream=content, filetype="pdf")
-
         all_text_pages = []
 
         for page_index, page in enumerate(src_doc):
-            # First try native text extraction (fast, no OCR needed for text PDFs)
             native_text = page.get_text().strip()
-
             if native_text and len(native_text) > 20:
-                # Page already has embedded text — use it directly
                 all_text_pages.append(f"[Page {page_index + 1}]\n{native_text}")
             else:
-                # Image-only page — run OCR via pymupdf's built-in Tesseract
-                # tessdata dir must be set so MuPDF finds the language pack
                 tp = page.get_textpage_ocr(
                     dpi=300,
                     full=True,
@@ -439,37 +481,24 @@ async def pdf_image_to_pdf(file: UploadFile = File(...)):
 
         src_doc.close()
 
-        # Build a clean PDF from all extracted text using reportlab
         full_text = "\n\n".join(all_text_pages)
-
         buffer = io.BytesIO()
         pdf_doc = SimpleDocTemplate(
-            buffer,
-            pagesize=letter,
-            rightMargin=72,
-            leftMargin=72,
-            topMargin=72,
-            bottomMargin=36,
+            buffer, pagesize=letter,
+            rightMargin=72, leftMargin=72,
+            topMargin=72, bottomMargin=36,
         )
 
         styles = getSampleStyleSheet()
         if 'OCRBody' not in styles:
             styles.add(ParagraphStyle(
-                name='OCRBody',
-                parent=styles['Normal'],
-                fontSize=11,
-                leading=15,
-                spaceAfter=4,
-                alignment=TA_LEFT,
+                name='OCRBody', parent=styles['Normal'],
+                fontSize=11, leading=15, spaceAfter=4, alignment=TA_LEFT,
             ))
         if 'OCRPageHeader' not in styles:
             styles.add(ParagraphStyle(
-                name='OCRPageHeader',
-                parent=styles['Heading3'],
-                fontSize=10,
-                leading=14,
-                spaceBefore=14,
-                spaceAfter=6,
+                name='OCRPageHeader', parent=styles['Heading3'],
+                fontSize=10, leading=14, spaceBefore=14, spaceAfter=6,
                 textColor=colors.HexColor('#888888'),
             ))
 
@@ -479,11 +508,9 @@ async def pdf_image_to_pdf(file: UploadFile = File(...)):
             if not clean:
                 story.append(Spacer(1, 6))
                 continue
-            # Page header lines like "[Page 1]"
             if re.match(r'^\[Page \d+\]$', clean):
                 story.append(Paragraph(clean, styles['OCRPageHeader']))
                 continue
-            # Escape XML special characters for reportlab
             safe = clean.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             story.append(Paragraph(safe, styles['OCRBody']))
 
@@ -544,7 +571,7 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=port,
-        ws="websockets",        # ← explicit WS handler
-        ws_ping_interval=20,    # ← keep alive
-        ws_ping_timeout=30,     # ← timeout
+        ws="websockets",
+        ws_ping_interval=20,
+        ws_ping_timeout=30,
     )
