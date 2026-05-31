@@ -21,6 +21,9 @@ from reportlab.platypus import Table, TableStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 
+from code_share_routes import code_share_router
+
+
 from docx import Document
 from pdf2docx import Converter
 import re
@@ -184,6 +187,7 @@ app.include_router(expense_mongo_router)
 app.include_router(group_splits_router)
 app.include_router(group_ws_router)
 app.include_router(community_router)
+app.include_router(code_share_router)
 
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
