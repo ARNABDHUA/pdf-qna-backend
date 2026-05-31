@@ -4,13 +4,16 @@ Endpoints:
   POST /codeshare          → save snippet, returns { id }
   GET  /codeshare/{id}     → fetch snippet
   GET  /codeshare          → list recent public snippets (last 50)
+  GET  /codeshare?ids=a,b  → list only snippets matching those IDs (user-specific)
+  DELETE /codeshare/{id}   → delete snippet
 """
 
 import os
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -39,13 +42,13 @@ class SnippetIn(BaseModel):
 
 
 class SnippetOut(BaseModel):
-    id:        str
-    title:     str
-    language:  str
-    code:      str
-    author:    str
+    id:         str
+    title:      str
+    language:   str
+    code:       str
+    author:     str
     created_at: str
-    views:     int
+    views:      int
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -83,8 +86,21 @@ async def get_snippet(snippet_id: str):
 
 
 @code_share_router.get("", response_model=list[SnippetOut])
-async def list_snippets():
-    cursor = snippets.find({}).sort("created_at", -1).limit(50)
+async def list_snippets(ids: Optional[str] = Query(default=None)):
+    """
+    If `ids` query param is provided (comma-separated), return only those snippets.
+    Otherwise return last 50 snippets (public fallback).
+    Example: GET /codeshare?ids=abc123,def456
+    """
+    if ids:
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
+        if not id_list:
+            return []
+        query = {"_id": {"$in": id_list}}
+        cursor = snippets.find(query).sort("created_at", -1)
+    else:
+        cursor = snippets.find({}).sort("created_at", -1).limit(50)
+
     results = []
     async for doc in cursor:
         doc["id"] = doc.pop("_id")
