@@ -7,6 +7,7 @@ import urllib.request
 import uvicorn
 import httpx
 from contextlib import asynccontextmanager
+from game_routes import game_router, game_ws_router
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -188,6 +189,8 @@ app.include_router(group_splits_router)
 app.include_router(group_ws_router)
 app.include_router(community_router)
 app.include_router(code_share_router)
+app.include_router(game_router)
+app.include_router(game_ws_router)
 
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
