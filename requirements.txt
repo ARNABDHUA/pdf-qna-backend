@@ -41,3 +41,5 @@ pymupdf
 websockets>=11.0
 pywebpush
 cryptography
+pptx
+python-pptx

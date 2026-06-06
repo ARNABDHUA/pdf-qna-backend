@@ -24,6 +24,7 @@ from reportlab.lib.enums import TA_LEFT
 
 from code_share_routes import code_share_router
 from videocall_routes import videocall_router, videocall_ws_router
+from ppt_routes import ppt_router
 
 
 from docx import Document
@@ -194,6 +195,7 @@ app.include_router(game_router)
 app.include_router(game_ws_router)
 app.include_router(videocall_router)
 app.include_router(videocall_ws_router)
+app.include_router(ppt_router)
 
 # ── Valid modes ───────────────────────────────────────────────────────────────
 VALID_MODES = {"chat", "legal", "drafting", "brief"}
