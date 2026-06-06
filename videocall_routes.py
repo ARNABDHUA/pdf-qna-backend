@@ -35,7 +35,7 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_PUBLIC_KEY  = os.environ.get("VAPID_PUBLIC_KEY",  "")
-VAPID_EMAIL       = os.environ.get("VAPID_EMAIL", "mailto:admin@example.com")
+VAPID_EMAILTO       = os.environ.get("VAPID_EMAILTO", "mailto:admin@example.com")
 
 # ── In-memory state (swap for Redis in production) ───────────────────────────
 # rooms[room_id] = { "peers": {peer_id: WebSocket} }
@@ -118,7 +118,7 @@ async def send_push(req: PushSendRequest):
             subscription_info=sub,
             data=payload,
             vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims={"sub": VAPID_EMAIL},
+            vapid_claims={"sub": VAPID_EMAILTO},
         )
         return {"ok": True}
     except WebPushException as e:
@@ -152,7 +152,7 @@ async def notify_room(req: NotifyRoomRequest):
                 subscription_info=sub,
                 data=json.dumps({"title": req.title, "body": req.body, "url": room_url}),
                 vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims={"sub": VAPID_EMAIL},
+                vapid_claims={"sub": VAPID_EMAILTO},
             )
             results[uid] = "sent"
         except WebPushException as e:

@@ -1,3 +1,26 @@
+# fastapi
+# uvicorn
+# httpx
+# pdfplumber
+# numpy
+# faiss-cpu
+# python-dotenv
+# pydantic
+# python-multipart
+# reportlab
+# python-docx
+# pdf2docx
+# certifi
+# motor
+# pymongo
+# # yt-dlp>=2024.1.0
+# # groq>=0.9.0
+# # imageio-ffmpeg
+# youtube-transcript-api>=1.0.0
+# pymupdf
+# websockets>=11.0
+# pywebpush
+# httpx
 fastapi
 uvicorn
 httpx
@@ -13,11 +36,8 @@ pdf2docx
 certifi
 motor
 pymongo
-# yt-dlp>=2024.1.0
-# groq>=0.9.0
-# imageio-ffmpeg
 youtube-transcript-api>=1.0.0
 pymupdf
 websockets>=11.0
 pywebpush
-httpx
+cryptography
